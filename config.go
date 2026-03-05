@@ -27,6 +27,7 @@ type Config struct {
 	AIKnowledgeDir    string           `json:"ai_knowledge_dir"`    // 知识库目录
 	AITriggerKeywords []string         `json:"ai_trigger_keywords"` // 触发关键词列表
 	AIRoles           map[int64]string `json:"ai_roles"`            // TG ID (string) 到 身份标识 (string) 的映射
+	BotAdmins         []int64          `json:"bot_admins"`          // 指定拥有机器人命令管控权的 TG ID
 }
 
 // LoadConfig 从 config.json 加载配置
@@ -53,6 +54,7 @@ func LoadConfig(filename string) (*Config, error) {
 				AIKnowledgeDir:    "config/knowledge",
 				AITriggerKeywords: make([]string, 0),
 				AIRoles:           make(map[int64]string),
+				BotAdmins:         make([]int64, 0),
 			}
 			bytes, _ := json.MarshalIndent(defaultConfig, "", "  ")
 			os.WriteFile(filename, bytes, 0644)
