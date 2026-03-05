@@ -77,3 +77,27 @@ func (ec *EmbyClient) GetTotalUsers() (int, error) {
 
 	return len(users), nil
 }
+
+// GetServerName 从 Emby 获取服务器名称
+func (ec *EmbyClient) GetServerName() (string, error) {
+	reqURL := fmt.Sprintf("%s/System/Info?api_key=%s", ec.URL, ec.APIKey)
+	resp, err := ec.Client.Get(reqURL)
+	if err != nil {
+		return "", fmt.Errorf("获取服务器信息失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Emby API 响应非 200: %d", resp.StatusCode)
+	}
+
+	var info map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return "", fmt.Errorf("解析服务器信息失败: %w", err)
+	}
+
+	if name, ok := info["ServerName"].(string); ok && name != "" {
+		return name, nil
+	}
+	return "EMBY", nil
+}

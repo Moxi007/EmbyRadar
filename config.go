@@ -13,6 +13,7 @@ type Config struct {
 	EmbyURL          string `json:"emby_url"`
 	EmbyAPIKey       string `json:"emby_api_key"`
 	UpdateInterval   int    `json:"update_interval"` // 以秒为单位
+	ServerName       string `json:"server_name"`     // 自定义服务名称，显示在状态面板
 }
 
 // LoadConfig 从 config.json 加载配置
@@ -23,7 +24,7 @@ func LoadConfig(filename string) (*Config, error) {
 			// 如果不存在，创建一个默认模板文件以便用户填写
 			defaultConfig := Config{
 				TelegramBotToken: "YOUR_TELEGRAM_BOT_TOKEN_HERE",
-				TelegramChatID:   -1000000000000, // 替换为真实 Chat ID，通常以 -100 开头
+				TelegramChatID:   -1000000000000,
 				EmbyURL:          "http://127.0.0.1:8096",
 				EmbyAPIKey:       "YOUR_EMBY_API_KEY_HERE",
 				UpdateInterval:   60,

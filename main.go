@@ -35,6 +35,17 @@ func main() {
 	// 2. 初始化 Emby 客户端
 	emby := NewEmbyClient(config.EmbyURL, config.EmbyAPIKey)
 
+	// 如果未配置 server_name，则自动从 Emby 获取服务器名称
+	if config.ServerName == "" {
+		if name, err := emby.GetServerName(); err == nil {
+			config.ServerName = name
+			log.Printf("自动获取服务名称: %s", name)
+		} else {
+			config.ServerName = "EMBY"
+			log.Printf("[Warn] 获取服务名称失败，使用默认名称: %v", err)
+		}
+	}
+
 	// 3. 初始化 Telegram Bot
 	bot, err := tgbotapi.NewBotAPI(config.TelegramBotToken)
 	if err != nil {
@@ -84,10 +95,11 @@ func updateStatus(bot *tgbotapi.BotAPI, emby *EmbyClient, config *Config, cache 
 
 	// 格式化文本
 	text := fmt.Sprintf(
-		"📊 *EMBY 实时状态*\n\n"+
+		"📊 *%s 实时状态*\n\n"+
 			"🎥 正在观看：*%d*\n"+
 			"👤 用户总数：*%d*\n"+
 			"📅 更新时间：*%s*",
+		config.ServerName,
 		activeSessions,
 		totalUsers,
 		time.Now().Format("15:04:05"),
