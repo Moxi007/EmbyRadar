@@ -285,7 +285,24 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			if msg.AuthorSignature != "" {
 				memberTitle = msg.AuthorSignature
 			}
-			displayRole = fmt.Sprintf("%s(头衔:%s)", userName, memberTitle)
+
+			// 尝试组装跳转回本群的链接
+			var groupLink string
+			if msg.SenderChat.UserName != "" {
+				groupLink = fmt.Sprintf("https://t.me/%s", msg.SenderChat.UserName)
+			} else {
+				chanIDStr := fmt.Sprintf("%d", senderID)
+				if strings.HasPrefix(chanIDStr, "-100") {
+					chanIDStr = chanIDStr[4:]
+					groupLink = fmt.Sprintf("https://t.me/c/%s/1", chanIDStr)
+				}
+			}
+
+			if groupLink != "" {
+				displayRole = fmt.Sprintf("[%s(头衔:%s)](%s)", userName, memberTitle, groupLink)
+			} else {
+				displayRole = fmt.Sprintf("%s(头衔:%s)", userName, memberTitle)
+			}
 		} else {
 			// 真正的外部关联频道发声
 			if msg.SenderChat.UserName != "" {
