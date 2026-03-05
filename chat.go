@@ -277,8 +277,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	if msg.SenderChat != nil {
 		senderID = msg.SenderChat.ID
 		userName = cleanMarkdownName(msg.SenderChat.Title)
-		// 默认追加频道 ID
-		displayRole = fmt.Sprintf("[%s(频道ID:%d)](tg://user?id=%d)", userName, senderID, senderID)
+		displayRole = userName // 频道发言暂不强制加链接，直接展示频道单纯字面名称以防无法识别
 	} else if msg.From != nil {
 		senderID = msg.From.ID
 		userName = msg.From.FirstName
