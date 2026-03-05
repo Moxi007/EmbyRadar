@@ -54,10 +54,27 @@ func main() {
 	bot.Debug = false
 	log.Printf("授权成功，Bot: %s", bot.Self.UserName)
 
-	// 4. 读取上一次置顶消息的缓存 ID
+	// 4. 初始化 AI 聊天模块（如果启用）
+	if config.AIEnabled {
+		aiClient := NewAIClient(config)
+		kb := NewKnowledgeBase(config.AIKnowledgeDir)
+		if err := kb.Load(); err != nil {
+			log.Printf("[Warn] 加载知识库失败: %v", err)
+		}
+		ctxManager := NewContextManager(config.AIMaxContext)
+		chatHandler := NewChatHandler(bot, aiClient, ctxManager, config, kb)
+
+		// 在独立 goroutine 中启动消息监听
+		go chatHandler.StartListening()
+		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", config.AIModel)
+	} else {
+		log.Printf("[AI] AI 聊天模块未启用")
+	}
+
+	// 5. 读取上一次置顶消息的缓存 ID
 	cache := loadCache()
 
-	// 5. 设置定时器
+	// 6. 设置定时器
 	ticker := time.NewTicker(time.Duration(config.UpdateInterval) * time.Second)
 	defer ticker.Stop()
 
