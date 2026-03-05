@@ -277,7 +277,18 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	if msg.SenderChat != nil {
 		senderID = msg.SenderChat.ID
 		userName = cleanMarkdownName(msg.SenderChat.Title)
-		displayRole = userName // 频道发言暂不强制加链接，直接展示频道单纯字面名称以防无法识别
+		if msg.SenderChat.UserName != "" {
+			displayRole = fmt.Sprintf("[%s](https://t.me/%s)", userName, msg.SenderChat.UserName)
+		} else {
+			// 私密频道通过特殊链接跳转 (移除 -100 前缀)
+			chanIDStr := fmt.Sprintf("%d", senderID)
+			if strings.HasPrefix(chanIDStr, "-100") {
+				chanIDStr = chanIDStr[4:]
+				displayRole = fmt.Sprintf("[%s](https://t.me/c/%s/1)", userName, chanIDStr)
+			} else {
+				displayRole = userName
+			}
+		}
 	} else if msg.From != nil {
 		senderID = msg.From.ID
 		userName = msg.From.FirstName
