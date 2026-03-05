@@ -272,21 +272,33 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	var userName string
 	var displayRole string
 
-	// 判断是否为频道代发（关联频道发的消息）
+	// 判断是否为频道代发或群内匿名管理员
 	var senderID int64
 	if msg.SenderChat != nil {
 		senderID = msg.SenderChat.ID
 		userName = cleanMarkdownName(msg.SenderChat.Title)
-		if msg.SenderChat.UserName != "" {
-			displayRole = fmt.Sprintf("[%s](https://t.me/%s)", userName, msg.SenderChat.UserName)
+
+		// 如果 SenderChat 的 ID 和当前群组一致，说明是本群的“匿名管理员”
+		if senderID == msg.Chat.ID {
+			// 提取有可能存在的匿名头衔
+			memberTitle := "匿名管理员"
+			if msg.AuthorSignature != "" {
+				memberTitle = msg.AuthorSignature
+			}
+			displayRole = fmt.Sprintf("%s(头衔:%s)", userName, memberTitle)
 		} else {
-			// 私密频道通过特殊链接跳转 (移除 -100 前缀)
-			chanIDStr := fmt.Sprintf("%d", senderID)
-			if strings.HasPrefix(chanIDStr, "-100") {
-				chanIDStr = chanIDStr[4:]
-				displayRole = fmt.Sprintf("[%s](https://t.me/c/%s/1)", userName, chanIDStr)
+			// 真正的外部关联频道发声
+			if msg.SenderChat.UserName != "" {
+				displayRole = fmt.Sprintf("[%s](https://t.me/%s)", userName, msg.SenderChat.UserName)
 			} else {
-				displayRole = userName
+				// 私密频道通过特殊链接跳转 (移除 -100 前缀)
+				chanIDStr := fmt.Sprintf("%d", senderID)
+				if strings.HasPrefix(chanIDStr, "-100") {
+					chanIDStr = chanIDStr[4:]
+					displayRole = fmt.Sprintf("[%s](https://t.me/c/%s/1)", userName, chanIDStr)
+				} else {
+					displayRole = userName
+				}
 			}
 		}
 	} else if msg.From != nil {
