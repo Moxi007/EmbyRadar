@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  embyradar:
+    image: ghcr.io/YOUR_GITHUB_USERNAME/embyradar:latest # 或者 docker.io/你的用户名/embyradar:latest
+    container_name: emby_radar
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # 挂载配置文件，宿主机需要提前存在该文件
+      - ./config.json:/app/config.json
+      # 挂载 message ID 缓存文件，防止重启丢失面板记录导致重新发新消息
+      - ./message_id.json:/app/message_id.json
