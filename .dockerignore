@@ -3,8 +3,7 @@
 .gitignore
 Dockerfile
 docker-compose.yml
-config.json
-message_id.json
+config/
 embyradar
 *.log
 tmp/
