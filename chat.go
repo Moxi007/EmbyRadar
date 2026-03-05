@@ -212,31 +212,44 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	ch.bot.Send(typingAction)
 
 	// 获取用户显示名称和头衔
-	userName := msg.From.FirstName
-	if msg.From.LastName != "" {
-		userName += " " + msg.From.LastName
-	}
+	var userName string
+	var displayRole string
 
-	// 尝试获取用户在此群的专属头衔（CustomTitle）
-	memberTitle := ""
-	if msg.Chat.Type == "supergroup" || msg.Chat.Type == "group" {
-		memberConfig := tgbotapi.GetChatMemberConfig{
-			ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
-				ChatID: chatID,
-				UserID: msg.From.ID,
-			},
+	// 判断是否为频道代发（关联频道发的消息）
+	if msg.SenderChat != nil {
+		userName = msg.SenderChat.Title
+		// 如果是指定频道，或刚好对应频道的 ID，可以在传给 AI 时带上特殊标识
+		displayRole = fmt.Sprintf("%s(频道ID:%d)", userName, msg.SenderChat.ID)
+	} else if msg.From != nil {
+		userName = msg.From.FirstName
+		if msg.From.LastName != "" {
+			userName += " " + msg.From.LastName
 		}
-		if member, err := ch.bot.GetChatMember(memberConfig); err == nil {
-			if member.CustomTitle != "" {
-				memberTitle = member.CustomTitle
+
+		// 尝试获取用户在此群的专属头衔（CustomTitle）
+		memberTitle := ""
+		if msg.Chat.Type == "supergroup" || msg.Chat.Type == "group" {
+			memberConfig := tgbotapi.GetChatMemberConfig{
+				ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+					ChatID: chatID,
+					UserID: msg.From.ID,
+				},
+			}
+			if member, err := ch.bot.GetChatMember(memberConfig); err == nil {
+				if member.CustomTitle != "" {
+					memberTitle = member.CustomTitle
+				}
 			}
 		}
-	}
 
-	// 合并头衔和名字（如果有头衔的话）
-	displayRole := userName
-	if memberTitle != "" {
-		displayRole = fmt.Sprintf("%s(头衔:%s)", userName, memberTitle)
+		// 合并头衔和名字（如果有头衔的话）
+		displayRole = userName
+		if memberTitle != "" {
+			displayRole = fmt.Sprintf("%s(头衔:%s)", userName, memberTitle)
+		}
+	} else {
+		userName = "未知用户"
+		displayRole = userName
 	}
 
 	// 构建消息列表
