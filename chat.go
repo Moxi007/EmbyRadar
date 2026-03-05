@@ -266,11 +266,14 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	var displayRole string
 
 	// 判断是否为频道代发（关联频道发的消息）
+	var senderID int64
 	if msg.SenderChat != nil {
+		senderID = msg.SenderChat.ID
 		userName = msg.SenderChat.Title
-		// 如果是指定频道，或刚好对应频道的 ID，可以在传给 AI 时带上特殊标识
-		displayRole = fmt.Sprintf("%s(频道ID:%d)", userName, msg.SenderChat.ID)
+		// 默认追加频道 ID
+		displayRole = fmt.Sprintf("%s(频道ID:%d)", userName, senderID)
 	} else if msg.From != nil {
+		senderID = msg.From.ID
 		userName = msg.From.FirstName
 		if msg.From.LastName != "" {
 			userName += " " + msg.From.LastName
@@ -282,7 +285,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			memberConfig := tgbotapi.GetChatMemberConfig{
 				ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
 					ChatID: chatID,
-					UserID: msg.From.ID,
+					UserID: senderID,
 				},
 			}
 			if member, err := ch.bot.GetChatMember(memberConfig); err == nil {
@@ -300,6 +303,13 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	} else {
 		userName = "未知用户"
 		displayRole = userName
+	}
+
+	// 检查 config.json 是否预设了该 ID 的特定身份 (覆盖之前的判定)
+	if senderID != 0 && ch.config.AIRoles != nil {
+		if roleName, exists := ch.config.AIRoles[senderID]; exists {
+			displayRole = fmt.Sprintf("%s(头衔:%s)", userName, roleName)
+		}
 	}
 
 	// 构建消息列表

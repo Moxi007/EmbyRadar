@@ -16,16 +16,17 @@ type Config struct {
 	ServerName       string `json:"server_name"`     // 自定义服务名称，显示在状态面板
 
 	// AI 聊天相关配置
-	AIEnabled         bool     `json:"ai_enabled"`          // 是否启用 AI 聊天
-	AIBaseURL         string   `json:"ai_base_url"`         // OpenAI 兼容 API 地址
-	AIAPIKey          string   `json:"ai_api_key"`          // AI API Key
-	AIModel           string   `json:"ai_model"`            // 模型名称
-	AISystemPrompt    string   `json:"ai_system_prompt"`    // 预设人设提示词
-	AIMaxContext      int      `json:"ai_max_context"`      // 最大上下文轮数
-	AIMaxTokens       int      `json:"ai_max_tokens"`       // 最大回复 token 数
-	AITemperature     float64  `json:"ai_temperature"`      // 温度参数
-	AIKnowledgeDir    string   `json:"ai_knowledge_dir"`    // 知识库目录
-	AITriggerKeywords []string `json:"ai_trigger_keywords"` // 触发关键词列表
+	AIEnabled         bool             `json:"ai_enabled"`          // 是否启用 AI 聊天
+	AIBaseURL         string           `json:"ai_base_url"`         // OpenAI 兼容 API 地址
+	AIAPIKey          string           `json:"ai_api_key"`          // AI API Key
+	AIModel           string           `json:"ai_model"`            // 模型名称
+	AISystemPrompt    string           `json:"ai_system_prompt"`    // 预设人设提示词
+	AIMaxContext      int              `json:"ai_max_context"`      // 最大上下文轮数
+	AIMaxTokens       int              `json:"ai_max_tokens"`       // 最大回复 token 数
+	AITemperature     float64          `json:"ai_temperature"`      // 温度参数
+	AIKnowledgeDir    string           `json:"ai_knowledge_dir"`    // 知识库目录
+	AITriggerKeywords []string         `json:"ai_trigger_keywords"` // 触发关键词列表
+	AIRoles           map[int64]string `json:"ai_roles"`            // TG ID (string) 到 身份标识 (string) 的映射
 }
 
 // LoadConfig 从 config.json 加载配置
@@ -50,7 +51,8 @@ func LoadConfig(filename string) (*Config, error) {
 				AIMaxTokens:       1000,
 				AITemperature:     0.7,
 				AIKnowledgeDir:    "config/knowledge",
-				AITriggerKeywords: []string{},
+				AITriggerKeywords: make([]string, 0),
+				AIRoles:           make(map[int64]string),
 			}
 			bytes, _ := json.MarshalIndent(defaultConfig, "", "  ")
 			os.WriteFile(filename, bytes, 0644)
