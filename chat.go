@@ -211,14 +211,36 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	typingAction := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
 	ch.bot.Send(typingAction)
 
-	// 获取用户显示名称
+	// 获取用户显示名称和头衔
 	userName := msg.From.FirstName
 	if msg.From.LastName != "" {
 		userName += " " + msg.From.LastName
 	}
 
+	// 尝试获取用户在此群的专属头衔（CustomTitle）
+	memberTitle := ""
+	if msg.Chat.Type == "supergroup" || msg.Chat.Type == "group" {
+		memberConfig := tgbotapi.GetChatMemberConfig{
+			ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+				ChatID: chatID,
+				UserID: msg.From.ID,
+			},
+		}
+		if member, err := ch.bot.GetChatMember(memberConfig); err == nil {
+			if member.CustomTitle != "" {
+				memberTitle = member.CustomTitle
+			}
+		}
+	}
+
+	// 合并头衔和名字（如果有头衔的话）
+	displayRole := userName
+	if memberTitle != "" {
+		displayRole = fmt.Sprintf("%s(头衔:%s)", userName, memberTitle)
+	}
+
 	// 构建消息列表
-	messages := ch.buildMessages(chatID, userName, userText)
+	messages := ch.buildMessages(chatID, displayRole, userText)
 
 	// 调用 AI API
 	reply, err := ch.aiClient.ChatCompletion(messages)
@@ -231,7 +253,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// 保存上下文（用户消息 + AI 回复）
 	ch.ctxManager.AddMessage(chatID, ChatMessage{
 		Role:    "user",
-		Content: fmt.Sprintf("[%s]: %s", userName, userText),
+		Content: fmt.Sprintf("[%s]: %s", displayRole, userText),
 	})
 	ch.ctxManager.AddMessage(chatID, ChatMessage{
 		Role:    "assistant",
