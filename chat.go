@@ -239,6 +239,13 @@ func (ch *ChatHandler) shouldRespond(msg *tgbotapi.Message) bool {
 	return false
 }
 
+// cleanMarkdownName 移除名字中的中括号或括号，防止破坏 Markdown 的 [text](url) 语法
+func cleanMarkdownName(name string) string {
+	name = strings.ReplaceAll(name, "[", "「")
+	name = strings.ReplaceAll(name, "]", "」")
+	return name
+}
+
 // handleAIResponse 处理 AI 回复逻辑
 func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// 提取用户消息文本
@@ -269,15 +276,16 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	var senderID int64
 	if msg.SenderChat != nil {
 		senderID = msg.SenderChat.ID
-		userName = msg.SenderChat.Title
+		userName = cleanMarkdownName(msg.SenderChat.Title)
 		// 默认追加频道 ID
-		displayRole = fmt.Sprintf("%s(频道ID:%d)", userName, senderID)
+		displayRole = fmt.Sprintf("[%s(频道ID:%d)](tg://user?id=%d)", userName, senderID, senderID)
 	} else if msg.From != nil {
 		senderID = msg.From.ID
 		userName = msg.From.FirstName
 		if msg.From.LastName != "" {
 			userName += " " + msg.From.LastName
 		}
+		userName = cleanMarkdownName(userName)
 
 		// 尝试获取用户在此群的专属头衔（CustomTitle）
 		memberTitle := ""
@@ -290,6 +298,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			}
 			if member, err := ch.bot.GetChatMember(memberConfig); err == nil {
 				if member.CustomTitle != "" {
+					memberTitle = cleanMarkdownName(memberTitle)
 					memberTitle = member.CustomTitle
 				}
 			}
@@ -425,7 +434,18 @@ func (ch *ChatHandler) sendReply(msg *tgbotapi.Message, text string) {
 
 // isAdmin 检查用户是否为群管理员或 Bot 管理员
 func (ch *ChatHandler) isAdmin(msg *tgbotapi.Message) bool {
-	// 私聊默认允许
+	// 如果配置文件指定了专属管理员名单，优先检查白名单
+	if len(ch.config.BotAdmins) > 0 {
+		for _, adminID := range ch.config.BotAdmins {
+			if msg.From.ID == adminID {
+				return true
+			}
+		}
+		// 配置了名单但自己不在名单内，直接拒绝
+		return false
+	}
+
+	// 如果未指定特定 ID 名单，回退为允许所有群管理员操作
 	if msg.Chat.Type == "private" {
 		return true
 	}
