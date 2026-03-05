@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -21,6 +23,9 @@ type Cache struct {
 }
 
 func main() {
+	// 0. 初始化日志文件
+	initLogger()
+
 	// 1. 加载配置
 	config, err := LoadConfig("config/config.json")
 	if err != nil {
@@ -153,4 +158,26 @@ func saveCache(cache Cache) {
 	if err == nil {
 		os.WriteFile(messageCacheFile, data, 0644)
 	}
+}
+
+// initLogger 初始化日志，同时输出到终端和日志文件
+func initLogger() {
+	logDir := "logs"
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		log.Fatalf("创建日志目录失败: %v", err)
+	}
+
+	logFile, err := os.OpenFile(
+		filepath.Join(logDir, "embyradar.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+		0644,
+	)
+	if err != nil {
+		log.Fatalf("打开日志文件失败: %v", err)
+	}
+
+	// 同时输出到终端和文件
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	log.SetOutput(multiWriter)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 }

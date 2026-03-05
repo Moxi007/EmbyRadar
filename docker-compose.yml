@@ -1,14 +1,12 @@
-version: '3.8'
-
 services:
   embyradar:
-    # 优先从本地构建，如果需要推送到私有仓库请保留 image
-    build: .
-    image: embyradar:local
-    container_name: emby_radar
+    image: lfy1680/embyradar:latest
+    container_name: embyradar
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
     volumes:
       # 挂载 config 目录，包含 config.json 和自动生成的 message_id.json
       - ./config:/app/config
+      # 挂载 logs 目录，持久化日志文件
+      - ./logs:/app/logs
