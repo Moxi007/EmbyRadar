@@ -335,7 +335,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// 保存上下文（用户消息 + AI 回复）
 	ch.ctxManager.AddMessage(chatID, ChatMessage{
 		Role:    "user",
-		Content: fmt.Sprintf("[%s]: %s", displayRole, userText),
+		Content: fmt.Sprintf("%s: %s", displayRole, userText),
 	})
 	ch.ctxManager.AddMessage(chatID, ChatMessage{
 		Role:    "assistant",
@@ -376,7 +376,7 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, userText string) []
 	// 3. 当前用户消息
 	messages = append(messages, ChatMessage{
 		Role:    "user",
-		Content: fmt.Sprintf("[%s]: %s", userName, userText),
+		Content: fmt.Sprintf("%s: %s", userName, userText),
 	})
 
 	return messages
