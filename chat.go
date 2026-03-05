@@ -89,21 +89,71 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 		return true
 
 	case "kb_add":
-		// 添加知识库条目，用法: /kb_add <名称> <内容...>
+		// 添加知识库条目
 		if ch.isAdmin(msg) {
-			args := msg.CommandArguments()
-			parts := strings.SplitN(strings.TrimSpace(args), " ", 2)
-			if len(parts) < 2 {
-				ch.sendReply(msg, "💡 用法: `/kb_add <条目名称> <内容>`\n\n示例:\n`/kb_add rules 群规第一条是不允许发色情内容`")
+			args := strings.TrimSpace(msg.CommandArguments())
+			var name, content string
+
+			if msg.ReplyToMessage != nil && msg.ReplyToMessage.Text != "" {
+				// 如果是回复了某条消息，使用被回复的消息作为内容
+				name = args
+				content = msg.ReplyToMessage.Text
+			} else {
+				// 否则采用常规的用空格分隔的形式
+				parts := strings.SplitN(args, " ", 2)
+				if len(parts) >= 2 {
+					name = parts[0]
+					content = parts[1]
+				}
+			}
+
+			if name == "" || content == "" {
+				ch.sendReply(msg, "💡 用法:\n1. 直接发送: `/kb_add <条目名称> <内容>`\n2. 选取一条文本消息进行**回复(Reply)**，并发送: `/kb_add <条目名称>`")
 				return true
 			}
-			name := parts[0]
-			content := parts[1]
+
+			// 发送正在处理提示
+			initMsg := tgbotapi.NewMessage(msg.Chat.ID, "⏳ 正在由 AI 格式化并提炼知识库内容...")
+			initMsg.ReplyToMessageID = msg.MessageID
+			sentMsg, _ := ch.bot.Send(initMsg)
+
+			// 调用 AI 进行内容格式化
+			formatPrompt := "你现在是一个知识库整理助手。请将用户提供的以下内容进行提炼和格式化，使其最适合作为机器人的知识库（Wiki）供日后检索使用。" +
+				"要求：\n1. 剔除对话中的闲聊成分，只保留核心事实或步骤。\n2. 如果适合，请尽量使用结构化的 Q&A (问答)格式或条理清晰的列表格式。\n3. 直接输出整理后的内容，不要包含任何前言或解释词汇。\n\n需要整理的内容如下：\n" + content
+
+			formattedContent, err := ch.aiClient.ChatCompletion([]ChatMessage{
+				{Role: "system", Content: "你是一个专业的知识库摘要引擎。"},
+				{Role: "user", Content: formatPrompt},
+			})
+
+			if err == nil && strings.TrimSpace(formattedContent) != "" {
+				content = formattedContent
+			} else {
+				log.Printf("[AI] 格式化知识库失败，将使用原始文本: %v", err)
+			}
 
 			if err := ch.kb.AddEntry(name, content); err != nil {
-				ch.sendReply(msg, fmt.Sprintf("❌ 添加知识库条目失败: %v", err))
+				if sentMsg.MessageID != 0 {
+					editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, fmt.Sprintf("❌ 添加知识库条目失败: %v", err))
+					ch.bot.Send(editMsg)
+				} else {
+					ch.sendReply(msg, fmt.Sprintf("❌ 添加知识库条目失败: %v", err))
+				}
 			} else {
-				ch.sendReply(msg, fmt.Sprintf("✅ 成功添加知识库条目: `%s`", name))
+				successText := fmt.Sprintf("✅ 成功添加知识库条目: `%s`\n\n**内容预览:**\n%s", name, content)
+				if len(successText) > 4000 {
+					successText = successText[:3900] + "...\n(内容过长已折叠)"
+				}
+				if sentMsg.MessageID != 0 {
+					editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, successText)
+					editMsg.ParseMode = "Markdown"
+					if _, err := ch.bot.Send(editMsg); err != nil {
+						editMsg.ParseMode = "" // 降级为纯文本
+						ch.bot.Send(editMsg)
+					}
+				} else {
+					ch.sendReply(msg, successText)
+				}
 			}
 		}
 		return true
