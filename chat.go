@@ -296,19 +296,19 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 
 		// 合并头衔和名字（如果有头衔的话）
-		displayRole = userName
+		displayRole = fmt.Sprintf("[%s](tg://user?id=%d)", userName, senderID)
 		if memberTitle != "" {
-			displayRole = fmt.Sprintf("%s(头衔:%s)", userName, memberTitle)
+			displayRole = fmt.Sprintf("[%s%s](tg://user?id=%d)", memberTitle, userName, senderID)
 		}
 	} else {
 		userName = "未知用户"
-		displayRole = userName
+		displayRole = "未知用户"
 	}
 
 	// 检查 config.json 是否预设了该 ID 的特定身份 (覆盖之前的判定)
 	if senderID != 0 && ch.config.AIRoles != nil {
 		if roleName, exists := ch.config.AIRoles[senderID]; exists {
-			displayRole = fmt.Sprintf("%s(头衔:%s)", userName, roleName)
+			displayRole = fmt.Sprintf("[%s](tg://user?id=%d)", roleName, senderID)
 		}
 	}
 
