@@ -12,7 +12,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const messageCacheFile = "message_id.json"
+const messageCacheFile = "config/message_id.json"
 
 // Cache 缓存上一次发送的消息 ID 和内容，避免重复编辑消耗 API 排队
 type Cache struct {
@@ -22,7 +22,7 @@ type Cache struct {
 
 func main() {
 	// 1. 加载配置
-	config, err := LoadConfig("config.json")
+	config, err := LoadConfig("config/config.json")
 	if err != nil {
 		log.Fatalf("配置错误: %v", err)
 	}

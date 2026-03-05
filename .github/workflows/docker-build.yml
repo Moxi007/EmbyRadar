@@ -12,7 +12,7 @@ on:
       tags:
         description: '镜像标签 (如: latest, v1.0.0, beta)'
         required: true
-        default: 'latest'
+        default: 'beta'
 
 jobs:
   build-and-push:

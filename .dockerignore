@@ -1,0 +1,12 @@
+.git
+.github
+.gitignore
+Dockerfile
+docker-compose.yml
+config.json
+message_id.json
+embyradar
+*.log
+tmp/
+node_modules/
+.DS_Store
