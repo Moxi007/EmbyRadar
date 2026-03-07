@@ -13,16 +13,18 @@ type ChatHandler struct {
 	bot        *tgbotapi.BotAPI
 	aiClient   *AIClient
 	ctxManager *ContextManager
+	embyClient *EmbyClient
 	kb         *KnowledgeBase
 	config     *Config
 }
 
 // NewChatHandler 创建聊天处理器
-func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *ContextManager, config *Config, kb *KnowledgeBase) *ChatHandler {
+func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *ContextManager, config *Config, kb *KnowledgeBase, embyClient *EmbyClient) *ChatHandler {
 	return &ChatHandler{
 		bot:        bot,
 		aiClient:   aiClient,
 		ctxManager: ctxManager,
+		embyClient: embyClient,
 		kb:         kb,
 		config:     config,
 	}
@@ -262,6 +264,25 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		return
 	}
 
+	// === 获取被引用的消息上下文 (ReplyContext) ===
+	if msg.ReplyToMessage != nil {
+		replyText := msg.ReplyToMessage.Text
+		if replyText == "" {
+			replyText = "[非文本或无法读取的消息]"
+		}
+		
+		replySender := "某人"
+		if msg.ReplyToMessage.From != nil {
+			replySender = msg.ReplyToMessage.From.FirstName
+			if msg.ReplyToMessage.From.LastName != "" {
+				replySender += " " + msg.ReplyToMessage.From.LastName
+			}
+		}
+
+		userText = fmt.Sprintf("（引用了 %s 的话：“%s”）\n我的回复/问题是：%s", replySender, replyText, userText)
+	}
+	// === 引用处理结束 ===
+
 	chatID := msg.Chat.ID
 
 	// 发送 "正在输入..." 状态
@@ -408,6 +429,15 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 	kbContent := ch.kb.GetContent()
 	if kbContent != "" {
 		systemPrompt += "\n\n" + kbContent
+	}
+
+	// 注入实时的 Emby 服务器客观数据
+	if ch.embyClient != nil {
+		users, errU := ch.embyClient.GetTotalUsers()
+		sessions, errS := ch.embyClient.GetActiveSessions()
+		if errU == nil && errS == nil {
+			systemPrompt += fmt.Sprintf("\n\n【实时客观数据（仅作参考）】：当前你管理的【小鸡服】共有注册大臣/平民 %d 人，此时此刻服务器内正有 %d 人在流连佳作。", users, sessions)
+		}
 	}
 
 	messages = append(messages, ChatMessage{
