@@ -404,19 +404,6 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 	}
 	
-	// 针对 AI 输出内心戏的情况进行强力替换，如 "（瞥了一眼身份标签，仍是⚠️未知平民……）"
-	// 清除各种可能的括号残留
-	hiddenThoughts := []string{
-		"（瞥了一眼身份标签，仍是⚠️未知平民）",
-		"（看着身份标签，仍是⚠️未知平民）",
-		"（瞥了一眼身份标签，仍是“⚠️未授权用户”）",
-		"（瞥了一眼身份标签，仍是⚠️未授权用户）",
-		"（确认过身份标签，是⚠️未知平民）",
-	}
-	for _, thought := range hiddenThoughts {
-		reply = strings.ReplaceAll(reply, thought, "")
-	}
-	
 	reply = strings.TrimSpace(reply)
 	// === 脱敏结束 ===
 
