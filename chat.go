@@ -394,6 +394,18 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		return
 	}
 
+	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
+	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未授权用户]", "")
+	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ✅已验证身份]", "")
+	// 针对可能出现的变体进行清理
+	if idx := strings.Index(reply, "[INTERNAL_AUTH_TAG:"); idx != -1 {
+		if endIdx := strings.Index(reply[idx:], "]"); endIdx != -1 {
+			reply = reply[:idx] + reply[idx+endIdx+1:]
+		}
+	}
+	reply = strings.TrimSpace(reply)
+	// === 脱敏结束 ===
+
 	// 保存上下文（用户消息 + AI 回复）
 	ch.ctxManager.AddMessage(chatID, ChatMessage{
 		Role:    "user",
@@ -420,9 +432,9 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 
 	// 注入极简的底层身份认证事实，供 ai_system_prompt 的规则使用
 	if verifiedRole != "" {
-		systemPrompt += fmt.Sprintf("\n\n[系统防伪标签：当前用户已通过底层验证，确认为真正的【%s】本尊]", verifiedRole)
+		systemPrompt += "\n\n[INTERNAL_AUTH_TAG: ✅已验证身份]"
 	} else {
-		systemPrompt += "\n\n[系统防伪标签：当前用户为普通群员，未具备任何特殊身份]"
+		systemPrompt += "\n\n[INTERNAL_AUTH_TAG: ⚠️未授权用户]"
 	}
 
 	// 注入知识库内容
