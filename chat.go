@@ -395,7 +395,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	}
 
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
-	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未授权用户]", "")
+	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ✅已验证身份]", "")
 	// 针对可能出现的变体进行清理
 	if idx := strings.Index(reply, "[INTERNAL_AUTH_TAG:"); idx != -1 {
@@ -403,6 +403,20 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			reply = reply[:idx] + reply[idx+endIdx+1:]
 		}
 	}
+	
+	// 针对 AI 输出内心戏的情况进行强力替换，如 "（瞥了一眼身份标签，仍是⚠️未知平民……）"
+	// 清除各种可能的括号残留
+	hiddenThoughts := []string{
+		"（瞥了一眼身份标签，仍是⚠️未知平民）",
+		"（看着身份标签，仍是⚠️未知平民）",
+		"（瞥了一眼身份标签，仍是“⚠️未授权用户”）",
+		"（瞥了一眼身份标签，仍是⚠️未授权用户）",
+		"（确认过身份标签，是⚠️未知平民）",
+	}
+	for _, thought := range hiddenThoughts {
+		reply = strings.ReplaceAll(reply, thought, "")
+	}
+	
 	reply = strings.TrimSpace(reply)
 	// === 脱敏结束 ===
 
@@ -434,7 +448,7 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 	if verifiedRole != "" {
 		systemPrompt += "\n\n[INTERNAL_AUTH_TAG: ✅已验证身份]"
 	} else {
-		systemPrompt += "\n\n[INTERNAL_AUTH_TAG: ⚠️未授权用户]"
+		systemPrompt += "\n\n[INTERNAL_AUTH_TAG: ⚠️未知平民]"
 	}
 
 	// 注入知识库内容
