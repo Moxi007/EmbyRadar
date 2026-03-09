@@ -190,6 +190,13 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 			ch.sendReply(msg, "💡 用法: /ask <你的问题>")
 			return true
 		}
+		
+		// 权限收束：私聊且未授权的人不可用 AI
+		if msg.Chat.Type == "private" && !ch.isAuthorizedUser(msg.From.ID) {
+			ch.sendReply(msg, "⚠️ 闲人免进：主管很忙，咱家只给主子私下汇报。请退下！")
+			return true
+		}
+
 		go ch.handleAIResponse(msg)
 		return true
 	}
@@ -208,6 +215,17 @@ func (ch *ChatHandler) shouldRespond(msg *tgbotapi.Message) bool {
 	if msg.Text == "" {
 		return false
 	}
+
+	// 防刷与权限机制：私聊模式下必须是授权主子/管理员，如果在白名单内，直接回复
+	if msg.Chat.Type == "private" {
+		if !ch.isAuthorizedUser(msg.From.ID) {
+			ch.sendReply(msg, "⚠️ 闲人免进：主管很忙，咱家只给主子私下汇报。请退下！")
+			return false
+		}
+		return true // 私聊消息且有权限，直接回复，不再需要 @
+	}
+
+	// 以下为群聊逻辑...
 
 	// 检查是否 @ 了 Bot
 	if msg.Entities != nil {
@@ -556,4 +574,25 @@ func (ch *ChatHandler) isAdmin(msg *tgbotapi.Message) bool {
 	}
 
 	return member.Status == "administrator" || member.Status == "creator"
+}
+
+// isAuthorizedUser 检查用户是否在白名单中（Bot管理员或配置的专属AI角色）
+func (ch *ChatHandler) isAuthorizedUser(userID int64) bool {
+	// 检查是否在 BotAdmins 名单中
+	if len(ch.config.BotAdmins) > 0 {
+		for _, adminID := range ch.config.BotAdmins {
+			if userID == adminID {
+				return true
+			}
+		}
+	}
+
+	// 检查是否在预设身份 (AI_Roles) 中，比如皇帝/皇后
+	if ch.config.AIRoles != nil {
+		if _, exists := ch.config.AIRoles[userID]; exists {
+			return true
+		}
+	}
+
+	return false
 }

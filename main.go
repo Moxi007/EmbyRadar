@@ -67,6 +67,9 @@ func main() {
 		// 在独立 goroutine 中启动消息监听
 		go chatHandler.StartListening()
 		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", config.AIModel)
+		
+		// 注册快捷命令菜单
+		setBotCommands(bot)
 	} else {
 		log.Printf("[AI] AI 聊天模块未启用")
 	}
@@ -209,4 +212,22 @@ func initLogger() {
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
 	log.SetOutput(multiWriter)
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+}
+
+// setBotCommands 设置机器人命令菜单，使私聊界面出现快捷菜单
+func setBotCommands(bot *tgbotapi.BotAPI) {
+	commands := []tgbotapi.BotCommand{
+		{Command: "ask", Description: "提问 (用法: /ask 你的问题)"},
+		{Command: "clear_ctx", Description: "清空当前聊天的上下文记忆"},
+		{Command: "kb_list", Description: "[管理] 查看当前知识库条目"},
+		{Command: "kb_add", Description: "[管理] 添加知识库 (用法: /kb_add 词条 内容)"},
+		{Command: "kb_del", Description: "[管理] 删除知识库 (用法: /kb_del 词条)"},
+		{Command: "reload_kb", Description: "[管理] 重新加载知识库 (从文件)"},
+	}
+	cfg := tgbotapi.NewSetMyCommands(commands...)
+	if _, err := bot.Request(cfg); err != nil {
+		log.Printf("[Warn] 设置 Bot 命令菜单失败: %v", err)
+	} else {
+		log.Printf("[Bot] 命令菜单已成功注册")
+	}
 }
