@@ -22,7 +22,7 @@ type UserInfoResponse struct {
 	Message string `json:"message"`
 	Data    struct {
 		Tg     json.Number `json:"tg"`     // TG ID，可能是数字或字符串
-		Iv     int         `json:"iv"`     // 积分/花币
+		Iv     int         `json:"iv"`     // 积分/货币余额
 		Name   string      `json:"name"`   // Emby 用户名
 		EmbyID string      `json:"embyid"` // Emby 账号 ID
 		Lv     string      `json:"lv"`     // 等级/状态, 如 'c' 代表封禁
@@ -87,17 +87,71 @@ func (c *EmbyBossClient) GetUserInfo(tgID int64) (*UserInfoResponse, error) {
 	return &userInfo, nil
 }
 
-// FormatUserInfo 将用户数据格式化为适合 AI 理解的自然语言
-func (r *UserInfoResponse) FormatForAI() string {
+// ConfigResponse 对应 EmbyBoss /bot/config 接口的返回结构
+type ConfigResponse struct {
+	Code         int    `json:"code"`
+	Message      string `json:"message"`
+	CurrencyName string `json:"currency_name"` // 服务端配置的货币名称
+}
+
+// GetCurrencyName 从 EmbyBoss 服务端动态获取货币名称。
+// 调用 /bot/config 端点，解析返回的 currency_name 字段。
+// 请求失败或返回异常时返回 error，供调用方 fallback 到本地配置。
+func (c *EmbyBossClient) GetCurrencyName() (string, error) {
+	url := fmt.Sprintf("%s/bot/config?token=%s", c.BaseURL, c.APIToken)
+	log.Printf("[EmbyBoss] 正在请求货币名称配置: %s/bot/config?token=***", c.BaseURL)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("创建请求失败: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		log.Printf("[EmbyBoss] 获取货币名称失败（网络错误）: %v", err)
+		return "", fmt.Errorf("请求 EmbyBoss 配置接口失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("EmbyBoss 配置接口 HTTP 错误 (状态码 %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取配置响应失败: %w", err)
+	}
+
+	var configResp ConfigResponse
+	if err := json.Unmarshal(bodyBytes, &configResp); err != nil {
+		return "", fmt.Errorf("解析配置响应失败: %w", err)
+	}
+
+	if configResp.Code != 200 {
+		return "", fmt.Errorf("EmbyBoss 配置接口返回错误: %s", configResp.Message)
+	}
+
+	if configResp.CurrencyName == "" {
+		return "", fmt.Errorf("EmbyBoss 配置接口返回的货币名称为空")
+	}
+
+	log.Printf("[EmbyBoss] 成功获取服务端货币名称: %s", configResp.CurrencyName)
+	return configResp.CurrencyName, nil
+}
+
+// FormatForAI 将用户数据格式化为适合 AI 理解的自然语言
+func (r *UserInfoResponse) FormatForAI(currencyName string) string {
 	status := "正常"
 	if r.Data.Lv == "c" {
 		status = "封禁状态(被禁止登录)"
 	}
-	
+
 	return fmt.Sprintf(
-		"【内部系统数据查询结果】：当前对话者的系统绑定账号名为“%s”，目前的可用资产余额为 %d 花币/积分。其账号当前所处状态判定为“%s”，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。",
+		"【内部系统数据查询结果】：当前对话者的系统绑定账号名为「%s」，目前的可用资产余额为 %d %s。其账号当前所处状态判定为「%s」，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。",
 		r.Data.Name,
 		r.Data.Iv,
+		currencyName,
 		status,
 		r.Data.Ex,
 	)

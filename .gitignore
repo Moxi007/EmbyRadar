@@ -22,3 +22,6 @@ go.work.sum
 config.json
 message_id.json
 embyradar
+
+# Kiro spec 和配置文件
+.kiro/

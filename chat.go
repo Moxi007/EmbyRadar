@@ -32,6 +32,18 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 	}
 }
 
+// getCurrencyName 动态获取货币名称，优先从 EmbyBoss API 获取，
+// 失败时回退到本地配置值，确保前后端货币名称一致
+func (ch *ChatHandler) getCurrencyName() string {
+	if ch.ebClient != nil {
+		if name, err := ch.ebClient.GetCurrencyName(); err == nil {
+			return name
+		}
+		log.Printf("[ChatHandler] 从 EmbyBoss API 获取货币名称失败，回退到本地配置值")
+	}
+	return ch.config.EmbyBossCurrencyName
+}
+
 // StartListening 启动消息监听（长轮询）
 func (ch *ChatHandler) StartListening() {
 	u := tgbotapi.NewUpdate(0)
@@ -192,7 +204,7 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 			ch.sendReply(msg, "💡 用法: /ask <你的问题>")
 			return true
 		}
-		
+
 		// 权限收束：私聊且未授权的人不可用 AI
 		if msg.Chat.Type == "private" && !ch.isAuthorizedUser(msg.From.ID) {
 			ch.sendReply(msg, "⚠️ 闲人免进：主管很忙，咱家只给主子私下汇报。请退下！")
@@ -290,7 +302,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		if replyText == "" {
 			replyText = "[非文本或无法读取的消息]"
 		}
-		
+
 		replySender := "某人"
 		if msg.ReplyToMessage.From != nil {
 			replySender = msg.ReplyToMessage.From.FirstName
@@ -453,13 +465,15 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 
 		if queryID != 0 {
 			log.Printf("[AI] 检测到询问用户(%d: %s)的资产/状态，正在通过 API 请求 EmbyBoss...", queryID, queryLabel)
+			// 动态获取货币名称，优先使用 API 返回值，失败时回退到本地配置
+			currencyName := ch.getCurrencyName()
 			userInfoResp, err := ch.ebClient.GetUserInfo(queryID)
 			if err == nil && userInfoResp != nil {
 				if queryID == senderID {
-					embyBossData = userInfoResp.FormatForAI()
+					embyBossData = userInfoResp.FormatForAI(currencyName)
 				} else {
-					embyBossData = fmt.Sprintf("【内部系统数据查询结果 - 查询对象: %s (TG ID: %d)】：该用户的系统绑定账号名为「%s」，目前的可用资产余额为 %d 花币/积分。其账号当前所处状态判定为「%s」，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。",
-						queryLabel, queryID, userInfoResp.Data.Name, userInfoResp.Data.Iv,
+					embyBossData = fmt.Sprintf("【内部系统数据查询结果 - 查询对象: %s (TG ID: %d)】：该用户的系统绑定账号名为「%s」，目前的可用资产余额为 %d %s。其账号当前所处状态判定为「%s」，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。",
+						queryLabel, queryID, userInfoResp.Data.Name, userInfoResp.Data.Iv, currencyName,
 						func() string {
 							if userInfoResp.Data.Lv == "c" {
 								return "封禁状态(被禁止登录)"
@@ -496,7 +510,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			reply = reply[:idx] + reply[idx+endIdx+1:]
 		}
 	}
-	
+
 	reply = strings.TrimSpace(reply)
 	// === 脱敏结束 ===
 
@@ -557,7 +571,7 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 
 	// 3. 当前用户消息，并在末尾追加最终的防伪标签 (满足 system_prompt 的要求)
 	var finalUserText string
-	
+
 	// 按需组装个人资产状态
 	extraPrivateData := ""
 	if embyBossData != "" {
