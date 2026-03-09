@@ -25,6 +25,8 @@ type Config struct {
 	AIMaxTokens       int              `json:"ai_max_tokens"`       // 最大回复 token 数
 	AITemperature     float64          `json:"ai_temperature"`      // 温度参数
 	AIKnowledgeDir    string           `json:"ai_knowledge_dir"`    // 知识库目录
+	AIEmbyStatsFormat string           `json:"ai_emby_stats_format"`// Emby 实时数据注入格式
+	EmbyBossAPIUrl    string           `json:"embyboss_api_url"`    // EmbyBoss 本地服务地址 API
 	AITriggerKeywords []string         `json:"ai_trigger_keywords"` // 触发关键词列表
 	AIRoles           map[int64]string `json:"ai_roles"`            // TG ID (string) 到 身份标识 (string) 的映射
 	BotAdmins         []int64          `json:"bot_admins"`          // 指定拥有机器人命令管控权的 TG ID
@@ -52,6 +54,8 @@ func LoadConfig(filename string) (*Config, error) {
 				AIMaxTokens:       1000,
 				AITemperature:     0.7,
 				AIKnowledgeDir:    "config/knowledge",
+				AIEmbyStatsFormat: "\n\n【实时客观数据（仅作参考）】：当前你管理的【小鸡服】共有注册大臣/平民 %d 人，此时此刻服务器内正有 %d 人在流连佳作。",
+				EmbyBossAPIUrl:    "http://127.0.0.1:8838",
 				AITriggerKeywords: make([]string, 0),
 				AIRoles:           make(map[int64]string),
 				BotAdmins:         make([]int64, 0),
@@ -89,6 +93,12 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 	if config.AIKnowledgeDir == "" {
 		config.AIKnowledgeDir = "config/knowledge"
+	}
+	if config.AIEmbyStatsFormat == "" {
+		config.AIEmbyStatsFormat = "\n\n【实时客观数据（仅作参考）】：当前你管理的【小鸡服】共有注册大臣/平民 %d 人，此时此刻服务器内正有 %d 人在流连佳作。"
+	}
+	if config.EmbyBossAPIUrl == "" {
+		config.EmbyBossAPIUrl = "http://127.0.0.1:8838"
 	}
 
 	return &config, nil

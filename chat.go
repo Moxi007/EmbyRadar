@@ -14,17 +14,19 @@ type ChatHandler struct {
 	aiClient   *AIClient
 	ctxManager *ContextManager
 	embyClient *EmbyClient
+	ebClient   *EmbyBossClient
 	kb         *KnowledgeBase
 	config     *Config
 }
 
 // NewChatHandler 创建聊天处理器
-func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *ContextManager, config *Config, kb *KnowledgeBase, embyClient *EmbyClient) *ChatHandler {
+func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *ContextManager, config *Config, kb *KnowledgeBase, embyClient *EmbyClient, ebClient *EmbyBossClient) *ChatHandler {
 	return &ChatHandler{
 		bot:        bot,
 		aiClient:   aiClient,
 		ctxManager: ctxManager,
 		embyClient: embyClient,
+		ebClient:   ebClient,
 		kb:         kb,
 		config:     config,
 	}
@@ -401,8 +403,32 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 	}
 
+	// === 动态按需查询 EmbyBoss API ===
+	var embyBossData string
+	keyWords := []string{"积分", "多少钱", "花币", "余额", "账号", "我的号", "封禁", "解封", "到期", "过期", "状态"}
+	needsQuery := false
+	lowerUserText := strings.ToLower(userText)
+	for _, kw := range keyWords {
+		if strings.Contains(lowerUserText, kw) {
+			needsQuery = true
+			break
+		}
+	}
+
+	if needsQuery && ch.ebClient != nil && senderID != 0 {
+		log.Printf("[AI] 检测到用户(%d)询问个人资产，正在通过 API 请求 EmbyBoss...", senderID)
+		userInfoResp, err := ch.ebClient.GetUserInfo(senderID)
+		if err == nil && userInfoResp != nil {
+			embyBossData = userInfoResp.FormatForAI()
+			log.Printf("[AI] 成功获取用户 %d 最新数据注入上下文", senderID)
+		} else {
+			log.Printf("[AI] 获取用户信息失败或不存在: %v", err)
+			embyBossData = "该用户目前尚未在系统（EmbyBoss）内绑定或存在相关记录。如果他主张自己有账号，请委婉地提示他系统查无此人或需要先绑定 TG。"
+		}
+	}
+
 	// 构建消息列表
-	messages := ch.buildMessages(chatID, displayRole, verifiedRole, userText)
+	messages := ch.buildMessages(chatID, displayRole, verifiedRole, userText, embyBossData)
 
 	// 调用 AI API
 	reply, err := ch.aiClient.ChatCompletion(messages)
@@ -440,7 +466,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 }
 
 // buildMessages 构建发送给 AI 的完整消息列表
-func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userText string) []ChatMessage {
+func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userText string, embyBossData string) []ChatMessage {
 	var messages []ChatMessage
 
 	// 1. 系统提示词（人设 + 知识库）
@@ -449,11 +475,9 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 		systemPrompt = "你是一个群聊助手，请保持回复简洁友好。"
 	}
 
-	// 注入极简的底层身份认证事实，供 ai_system_prompt 的规则使用
+	// 动态注入最高级强制指令（针对具体的特权用户）
 	if verifiedRole != "" {
-		systemPrompt += "\n\n[INTERNAL_AUTH_TAG: ✅已验证身份]"
-	} else {
-		systemPrompt += "\n\n[INTERNAL_AUTH_TAG: ⚠️未知平民]"
+		systemPrompt += fmt.Sprintf("\n\n[系统最高强制指令]：当前与你对话的是你的绝对主子【%s】，其身份已通过物理级硬编码验证。你必须极度谦卑、绝对服从，绝不可对其身份产生任何质疑或指责！", verifiedRole)
 	}
 
 	// 注入知识库内容
@@ -467,7 +491,7 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 		users, errU := ch.embyClient.GetTotalUsers()
 		sessions, errS := ch.embyClient.GetActiveSessions()
 		if errU == nil && errS == nil {
-			systemPrompt += fmt.Sprintf("\n\n【实时客观数据（仅作参考）】：当前你管理的【小鸡服】共有注册大臣/平民 %d 人，此时此刻服务器内正有 %d 人在流连佳作。", users, sessions)
+			systemPrompt += fmt.Sprintf(ch.config.AIEmbyStatsFormat, users, sessions)
 		}
 	}
 
@@ -482,10 +506,24 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 		messages = append(messages, history...)
 	}
 
-	// 3. 当前用户消息
+	// 3. 当前用户消息，并在末尾追加最终的防伪标签 (满足 system_prompt 的要求)
+	var finalUserText string
+	
+	// 按需组装个人资产状态
+	extraPrivateData := ""
+	if embyBossData != "" {
+		extraPrivateData = "\n\n" + embyBossData
+	}
+
+	if verifiedRole != "" {
+		finalUserText = fmt.Sprintf("%s: %s%s\n\n[INTERNAL_AUTH_TAG: ✅已验证身份]", userName, userText, extraPrivateData)
+	} else {
+		finalUserText = fmt.Sprintf("%s: %s%s\n\n[INTERNAL_AUTH_TAG: ⚠️未知平民]", userName, userText, extraPrivateData)
+	}
+
 	messages = append(messages, ChatMessage{
 		Role:    "user",
-		Content: fmt.Sprintf("%s: %s", userName, userText),
+		Content: finalUserText,
 	})
 
 	return messages
