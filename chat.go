@@ -123,12 +123,15 @@ func (ch *ChatHandler) NotifyNewEmbyUser(tgID int64, tgName string, embyName str
 
 	// 触发 AI 的欢迎语
 	displayRole := fmt.Sprintf("[%s](tg://user?id=%d)", tgName, tgID)
-	embyAccountMsg := ""
-	if embyName != "" {
-		embyAccountMsg = fmt.Sprintf("他的专属账号「%s」也已经成功开通！", embyName)
-	}
 	
-	welcomePrompt := fmt.Sprintf("这是系统内部消息：有一位名叫 %s 的平民刚刚在咱们【小鸡服】成功开通了账号！%s 请你用极其热情、同时又带有【大内主管】架子的专属语气，代表【小鸡服】官方热烈欢迎他的入驻！", displayRole, embyAccountMsg)
+	welcomePrompt := ""
+	if embyName != "" {
+		// 如果配置文件中的内容没有包含 %s，fmt.Sprintf 可能会报错或行为异常，但这取决于配置的准确性，
+		// 通常应当指导用户保留原有的占位符结构
+		welcomePrompt = fmt.Sprintf(ch.config.WelcomeEmbyPrompt, displayRole, embyName)
+	} else {
+		welcomePrompt = fmt.Sprintf(ch.config.WelcomeCodePrompt, displayRole)
+	}
 
 	// 构建一次性消息调用 AI，赋予“系统最高权限”以防被 AI 当作伪造消息拦截
 	messages := ch.buildMessages(ch.config.TelegramChatID, "系统通报", "系统最高权限", welcomePrompt, "")

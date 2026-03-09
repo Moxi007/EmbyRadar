@@ -31,6 +31,8 @@ type Config struct {
 	EmbyBossCurrencyName string           `json:"embyboss_currency_name"` // 积分/货币名称，API 获取失败时的默认值
 	WebhookPort          int              `json:"webhook_port"`           // Webhook 监听端口，供 EmbyBoss 推送事件使用
 	WelcomeStickerID     string           `json:"welcome_sticker_id"`     // 新用户加群时发送的欢迎贴纸ID
+	WelcomeEmbyPrompt    string           `json:"welcome_emby_prompt"`    // 发放 Emby 账号时的提示词
+	WelcomeCodePrompt    string           `json:"welcome_code_prompt"`    // 仅兑换注册码时的提示词
 	AITriggerKeywords    []string         `json:"ai_trigger_keywords"`    // 触发关键词列表
 	AIRoles              map[int64]string `json:"ai_roles"`               // TG ID (string) 到 身份标识 (string) 的映射
 	BotAdmins            []int64          `json:"bot_admins"`             // 指定拥有机器人命令管控权的 TG ID
@@ -61,6 +63,8 @@ func LoadConfig(filename string) (*Config, error) {
 				AIEmbyStatsFormat: "\n\n【实时客观数据（仅作参考）】：当前你管理的【小鸡服】共有注册大臣/平民 %d 人，此时此刻服务器内正有 %d 人在流连佳作。",
 				EmbyBossAPIUrl:    "http://127.0.0.1:8838",
 				WebhookPort:       8889,
+				WelcomeEmbyPrompt: "这是系统通知：新平民 %s 刚刚成功开通了【小鸡服】的专属账号「%s」！\n\n【你的任务】：你现在必须在群里公开欢迎这位新平民。请直接对他说话，用你【大内主管】的专属语气（傲娇、有架子但也表示欢迎）发表一段欢迎词。\n【严禁】：不得带有任何对系统指令回复的动作（如“奴才遵旨”、“这就去办”等），也不要对这条通知本身做任何评价，必须且只能输出你对新平民说的欢迎语本身！切记！",
+				WelcomeCodePrompt: "这是系统通知：新平民 %s 刚刚成功使用了注册码，获得了【小鸡服】的入驻资格！\n\n【你的任务】：你现在必须在群里公开欢迎这位新平民。请直接对他说话，用你【大内主管】的专属语气（傲娇、有架子但也表示欢迎）发表一段欢迎词。\n【严禁】：不得带有任何对系统指令回复的动作（如“奴才遵旨”、“这就去办”等），也不要对这条通知本身做任何评价，必须且只能输出你对新平民说的欢迎语本身！切记！",
 				AITriggerKeywords: make([]string, 0),
 				AIRoles:           make(map[int64]string),
 				BotAdmins:         make([]int64, 0),
@@ -110,6 +114,12 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 	if config.WebhookPort == 0 {
 		config.WebhookPort = 8889
+	}
+	if config.WelcomeEmbyPrompt == "" {
+		config.WelcomeEmbyPrompt = "这是系统通知：新平民 %s 刚刚成功开通了【小鸡服】的专属账号「%s」！\n\n【你的任务】：你现在必须在群里公开欢迎这位新平民。请直接对他说话，用你【大内主管】的专属语气（傲娇、有架子但也表示欢迎）发表一段欢迎词。\n【严禁】：不得带有任何对系统指令回复的动作（如“奴才遵旨”、“这就去办”等），也不要对这条通知本身做任何评价，必须且只能输出你对新平民说的欢迎语本身！切记！"
+	}
+	if config.WelcomeCodePrompt == "" {
+		config.WelcomeCodePrompt = "这是系统通知：新平民 %s 刚刚成功使用了注册码，获得了【小鸡服】的入驻资格！\n\n【你的任务】：你现在必须在群里公开欢迎这位新平民。请直接对他说话，用你【大内主管】的专属语气（傲娇、有架子但也表示欢迎）发表一段欢迎词。\n【严禁】：不得带有任何对系统指令回复的动作（如“奴才遵旨”、“这就去办”等），也不要对这条通知本身做任何评价，必须且只能输出你对新平民说的欢迎语本身！切记！"
 	}
 
 	return &config, nil
