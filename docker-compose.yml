@@ -2,6 +2,7 @@ services:
   embyradar:
     image: lfy1680/embyradar:latest
     container_name: embyradar
+    network_mode: host
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
