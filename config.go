@@ -29,6 +29,8 @@ type Config struct {
 	EmbyBossAPIUrl       string           `json:"embyboss_api_url"`       // EmbyBoss 本地服务地址 API
 	EmbyBossAPIToken     string           `json:"embyboss_api_token"`     // EmbyBoss 的 bot_token（用于接口鉴权）
 	EmbyBossCurrencyName string           `json:"embyboss_currency_name"` // 积分/货币名称，API 获取失败时的默认值
+	WebhookPort          int              `json:"webhook_port"`           // Webhook 监听端口，供 EmbyBoss 推送事件使用
+	WelcomeStickerID     string           `json:"welcome_sticker_id"`     // 新用户加群时发送的欢迎贴纸ID
 	AITriggerKeywords    []string         `json:"ai_trigger_keywords"`    // 触发关键词列表
 	AIRoles              map[int64]string `json:"ai_roles"`               // TG ID (string) 到 身份标识 (string) 的映射
 	BotAdmins            []int64          `json:"bot_admins"`             // 指定拥有机器人命令管控权的 TG ID
@@ -58,6 +60,7 @@ func LoadConfig(filename string) (*Config, error) {
 				AIKnowledgeDir:    "config/knowledge",
 				AIEmbyStatsFormat: "\n\n【实时客观数据（仅作参考）】：当前你管理的【小鸡服】共有注册大臣/平民 %d 人，此时此刻服务器内正有 %d 人在流连佳作。",
 				EmbyBossAPIUrl:    "http://127.0.0.1:8838",
+				WebhookPort:       8889,
 				AITriggerKeywords: make([]string, 0),
 				AIRoles:           make(map[int64]string),
 				BotAdmins:         make([]int64, 0),
@@ -104,6 +107,9 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 	if config.EmbyBossCurrencyName == "" {
 		config.EmbyBossCurrencyName = "鸡蛋"
+	}
+	if config.WebhookPort == 0 {
+		config.WebhookPort = 8889
 	}
 
 	return &config, nil

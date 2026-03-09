@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -67,6 +69,103 @@ func (ch *ChatHandler) StartListening() {
 		if ch.shouldRespond(update.Message) {
 			go ch.handleAIResponse(update.Message)
 		}
+	}
+}
+
+// WebhookPayload 接收从 EmbyBoss 推送过来的建号通知
+type WebhookPayload struct {
+	TgID     int64  `json:"tg_id"`
+	TgName   string `json:"tg_name"`
+	EmbyName string `json:"emby_name"`
+}
+
+// StartWebhookServer 启动内部 HTTP 服务接收 EmbyBoss 的推送
+func (ch *ChatHandler) StartWebhookServer() {
+	http.HandleFunc("/webhook/new_user", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var payload WebhookPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "Invalid payload", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("[Webhook] 收到新用户注册推送: TG ID=%d, TG Name=%s, Emby Name=%s", payload.TgID, payload.TgName, payload.EmbyName)
+		
+		// 异步处理新用户欢迎逻辑
+		go ch.NotifyNewEmbyUser(payload.TgID, payload.TgName, payload.EmbyName)
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	addr := fmt.Sprintf("0.0.0.0:%d", ch.config.WebhookPort)
+	log.Printf("[Webhook] 开始监听端口 %s 用于接收内部推送...", addr)
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Printf("[Err] Webhook 服务启动失败: %v", err)
+	}
+}
+
+// NotifyNewEmbyUser 在发送贴纸并调用 AI 欢迎新主子/平民
+func (ch *ChatHandler) NotifyNewEmbyUser(tgID int64, tgName string, embyName string) {
+	tgName = cleanMarkdownName(tgName)
+
+	// 发送预设好的贴纸（如果在配置中设置了）
+	if ch.config.WelcomeStickerID != "" {
+		stickerMsg := tgbotapi.NewSticker(ch.config.TelegramChatID, tgbotapi.FileID(ch.config.WelcomeStickerID))
+		if _, err := ch.bot.Send(stickerMsg); err != nil {
+			log.Printf("[AI] 发送欢迎贴纸失败: %v", err)
+		}
+	}
+
+	// 触发 AI 的欢迎语
+	displayRole := fmt.Sprintf("[%s](tg://user?id=%d)", tgName, tgID)
+	embyAccountMsg := ""
+	if embyName != "" {
+		embyAccountMsg = fmt.Sprintf("他的专属账号「%s」也已经成功开通！", embyName)
+	}
+	
+	welcomePrompt := fmt.Sprintf("这是系统内部消息：有一位名叫 %s 的平民刚刚在咱们【小鸡服】成功开通了账号！%s 请你用极其热情、同时又带有【大内主管】架子的专属语气，代表【小鸡服】官方热烈欢迎他的入驻！", displayRole, embyAccountMsg)
+
+	// 构建一次性消息调用 AI
+	messages := ch.buildMessages(ch.config.TelegramChatID, "系统通报", "", welcomePrompt, "")
+	
+	reply, err := ch.aiClient.ChatCompletion(messages)
+	if err != nil {
+		log.Printf("[AI] 欢迎新成员调用 AI 失败: %v", err)
+		return
+	}
+
+	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
+	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
+	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ✅已验证身份]", "")
+	if idx := strings.Index(reply, "[INTERNAL_AUTH_TAG:"); idx != -1 {
+		if endIdx := strings.Index(reply[idx:], "]"); endIdx != -1 {
+			reply = reply[:idx] + reply[idx+endIdx+1:]
+		}
+	}
+	reply = strings.TrimSpace(reply)
+	// === 脱敏结束 ===
+
+	// 保存上下文让 AI 记住这个新来的
+	ch.ctxManager.AddMessage(ch.config.TelegramChatID, ChatMessage{
+		Role:    "user",
+		Content: fmt.Sprintf("系统通报: %s", welcomePrompt),
+	})
+	ch.ctxManager.AddMessage(ch.config.TelegramChatID, ChatMessage{
+		Role:    "assistant",
+		Content: reply,
+	})
+
+	// 发送 AI 回复到主群聊
+	replyMsg := tgbotapi.NewMessage(ch.config.TelegramChatID, reply)
+	replyMsg.ParseMode = "Markdown"
+	if _, err := ch.bot.Send(replyMsg); err != nil {
+		replyMsg.ParseMode = ""
+		ch.bot.Send(replyMsg)
 	}
 }
 

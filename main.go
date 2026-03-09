@@ -67,6 +67,10 @@ func main() {
 
 		// 在独立 goroutine 中启动消息监听
 		go chatHandler.StartListening()
+
+		// 在独立 goroutine 中启动 Webhook 监听
+		go chatHandler.StartWebhookServer()
+
 		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", config.AIModel)
 
 		// 注册快捷命令菜单
