@@ -11,6 +11,7 @@ import (
 // EmbyBossClient 用于与本地 EmbyBoss FastAPI 交互
 type EmbyBossClient struct {
 	BaseURL    string
+	APIToken   string // EmbyBoss 的鉴权 Token（即 EmbyBoss 的 bot_token）
 	HTTPClient *http.Client
 }
 
@@ -30,9 +31,10 @@ type UserInfoResponse struct {
 }
 
 // NewEmbyBossClient 创建一个新的 EmbyBoss 客户端实例
-func NewEmbyBossClient(baseURL string) *EmbyBossClient {
+func NewEmbyBossClient(baseURL string, apiToken string) *EmbyBossClient {
 	return &EmbyBossClient{
-		BaseURL: baseURL,
+		BaseURL:  baseURL,
+		APIToken: apiToken,
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Second, // 内网请求，5秒足够
 		},
@@ -41,7 +43,7 @@ func NewEmbyBossClient(baseURL string) *EmbyBossClient {
 
 // GetUserInfo 根据 TG ID 查询用户在 EmbyBoss 中的信息
 func (c *EmbyBossClient) GetUserInfo(tgID int64) (*UserInfoResponse, error) {
-	url := fmt.Sprintf("%s/user_info?tg=%d", c.BaseURL, tgID)
+	url := fmt.Sprintf("%s/user/user_info?tg=%d&token=%s", c.BaseURL, tgID, c.APIToken)
 	
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {

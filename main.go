@@ -62,7 +62,7 @@ func main() {
 			log.Printf("[Warn] 加载知识库失败: %v", err)
 		}
 		ctxManager := NewContextManager(config.AIMaxContext)
-		ebClient := NewEmbyBossClient(config.EmbyBossAPIUrl)
+		ebClient := NewEmbyBossClient(config.EmbyBossAPIUrl, config.EmbyBossAPIToken)
 		chatHandler := NewChatHandler(bot, aiClient, ctxManager, config, kb, emby, ebClient)
 
 		// 在独立 goroutine 中启动消息监听

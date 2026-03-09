@@ -27,6 +27,7 @@ type Config struct {
 	AIKnowledgeDir    string           `json:"ai_knowledge_dir"`    // 知识库目录
 	AIEmbyStatsFormat string           `json:"ai_emby_stats_format"`// Emby 实时数据注入格式
 	EmbyBossAPIUrl    string           `json:"embyboss_api_url"`    // EmbyBoss 本地服务地址 API
+	EmbyBossAPIToken  string           `json:"embyboss_api_token"`  // EmbyBoss 的 bot_token（用于接口鉴权）
 	AITriggerKeywords []string         `json:"ai_trigger_keywords"` // 触发关键词列表
 	AIRoles           map[int64]string `json:"ai_roles"`            // TG ID (string) 到 身份标识 (string) 的映射
 	BotAdmins         []int64          `json:"bot_admins"`          // 指定拥有机器人命令管控权的 TG ID
