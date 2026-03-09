@@ -130,8 +130,8 @@ func (ch *ChatHandler) NotifyNewEmbyUser(tgID int64, tgName string, embyName str
 	
 	welcomePrompt := fmt.Sprintf("这是系统内部消息：有一位名叫 %s 的平民刚刚在咱们【小鸡服】成功开通了账号！%s 请你用极其热情、同时又带有【大内主管】架子的专属语气，代表【小鸡服】官方热烈欢迎他的入驻！", displayRole, embyAccountMsg)
 
-	// 构建一次性消息调用 AI
-	messages := ch.buildMessages(ch.config.TelegramChatID, "系统通报", "", welcomePrompt, "")
+	// 构建一次性消息调用 AI，赋予“系统最高权限”以防被 AI 当作伪造消息拦截
+	messages := ch.buildMessages(ch.config.TelegramChatID, "系统通报", "系统最高权限", welcomePrompt, "")
 	
 	reply, err := ch.aiClient.ChatCompletion(messages)
 	if err != nil {
