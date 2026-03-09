@@ -68,7 +68,7 @@ func main() {
 		// 在独立 goroutine 中启动消息监听
 		go chatHandler.StartListening()
 		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", config.AIModel)
-		
+
 		// 注册快捷命令菜单
 		setBotCommands(bot)
 	} else {
@@ -123,7 +123,7 @@ func updateStatus(bot *tgbotapi.BotAPI, emby *EmbyClient, config *Config, cache 
 		config.ServerName,
 		activeSessions,
 		totalUsers,
-		time.Now().Format("15:04:05"),
+		time.Now().Format("15:04"),
 	)
 
 	// 如果内容没有改变，不要发送编辑请求以避免 rate limit

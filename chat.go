@@ -472,7 +472,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 				if queryID == senderID {
 					embyBossData = userInfoResp.FormatForAI(currencyName)
 				} else {
-					embyBossData = fmt.Sprintf("【内部系统数据查询结果 - 查询对象: %s (TG ID: %d)】：该用户的系统绑定账号名为「%s」，目前的可用资产余额为 %d %s。其账号当前所处状态判定为「%s」，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。",
+					embyBossData = fmt.Sprintf("【内部系统数据查询结果 - 查询对象: %s (TG ID: %d)】：该用户的系统绑定账号名为「%s」，目前的可用资产余额为 %d %s。其账号当前所处状态判定为「%s」，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。注意：货币单位必须严格使用「%s」，禁止自行替换为其他名称。",
 						queryLabel, queryID, userInfoResp.Data.Name, userInfoResp.Data.Iv, currencyName,
 						func() string {
 							if userInfoResp.Data.Lv == "c" {
@@ -480,7 +480,8 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 							}
 							return "正常"
 						}(),
-						userInfoResp.Data.Ex)
+						userInfoResp.Data.Ex,
+						currencyName)
 				}
 				log.Printf("[AI] 成功获取用户 %d (%s) 最新数据注入上下文", queryID, queryLabel)
 			} else {

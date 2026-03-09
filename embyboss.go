@@ -148,11 +148,12 @@ func (r *UserInfoResponse) FormatForAI(currencyName string) string {
 	}
 
 	return fmt.Sprintf(
-		"【内部系统数据查询结果】：当前对话者的系统绑定账号名为「%s」，目前的可用资产余额为 %d %s。其账号当前所处状态判定为「%s」，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。",
+		"【内部系统数据查询结果】：当前对话者的系统绑定账号名为「%s」，目前的可用资产余额为 %d %s。其账号当前所处状态判定为「%s」，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。注意：货币单位必须严格使用「%s」，禁止自行替换为其他名称。",
 		r.Data.Name,
 		r.Data.Iv,
 		currencyName,
 		status,
 		r.Data.Ex,
+		currencyName,
 	)
 }
