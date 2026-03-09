@@ -405,7 +405,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 
 	// === 动态按需查询 EmbyBoss API ===
 	var embyBossData string
-	keyWords := []string{"积分", "多少钱", "花币", "余额", "账号", "我的号", "封禁", "解封", "到期", "过期", "状态"}
+	keyWords := []string{"积分", "多少钱", "花币", "余额", "账号", "我的号", "封禁", "解封", "到期", "过期", "状态", "鸡蛋", "播放", "时长", "查一下", "看一下", "看看"}
 	needsQuery := false
 	lowerUserText := strings.ToLower(userText)
 	for _, kw := range keyWords {
@@ -415,15 +415,64 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 	}
 
-	if needsQuery && ch.ebClient != nil && senderID != 0 {
-		log.Printf("[AI] 检测到用户(%d)询问个人资产，正在通过 API 请求 EmbyBoss...", senderID)
-		userInfoResp, err := ch.ebClient.GetUserInfo(senderID)
-		if err == nil && userInfoResp != nil {
-			embyBossData = userInfoResp.FormatForAI()
-			log.Printf("[AI] 成功获取用户 %d 最新数据注入上下文", senderID)
-		} else {
-			log.Printf("[AI] 获取用户信息失败或不存在: %v", err)
-			embyBossData = "该用户目前尚未在系统（EmbyBoss）内绑定或存在相关记录。如果他主张自己有账号，请委婉地提示他系统查无此人或需要先绑定 TG。"
+	if needsQuery && ch.ebClient != nil {
+		// 优先判断：如果是回复了某人的消息并且在问"他/她"的信息，查被回复者
+		// 否则查发消息的人自己
+		queryID := senderID
+		queryLabel := "自己"
+
+		if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+			// 检测是否在询问"他/她/对方"的信息（而不是"我的"）
+			askAboutOther := false
+			otherKeywords := []string{"他的", "她的", "他", "她", "这个人", "此人", "对方", "看一下", "看看", "查一下", "查查"}
+			for _, ok := range otherKeywords {
+				if strings.Contains(lowerUserText, ok) {
+					askAboutOther = true
+					break
+				}
+			}
+			// 如果没有明确说"我的"，且回复了别人消息，默认查被回复者
+			myKeywords := []string{"我的", "我有", "我还"}
+			askAboutSelf := false
+			for _, mk := range myKeywords {
+				if strings.Contains(lowerUserText, mk) {
+					askAboutSelf = true
+					break
+				}
+			}
+
+			if !askAboutSelf || askAboutOther {
+				queryID = msg.ReplyToMessage.From.ID
+				replyName := msg.ReplyToMessage.From.FirstName
+				if msg.ReplyToMessage.From.LastName != "" {
+					replyName += " " + msg.ReplyToMessage.From.LastName
+				}
+				queryLabel = replyName
+			}
+		}
+
+		if queryID != 0 {
+			log.Printf("[AI] 检测到询问用户(%d: %s)的资产/状态，正在通过 API 请求 EmbyBoss...", queryID, queryLabel)
+			userInfoResp, err := ch.ebClient.GetUserInfo(queryID)
+			if err == nil && userInfoResp != nil {
+				if queryID == senderID {
+					embyBossData = userInfoResp.FormatForAI()
+				} else {
+					embyBossData = fmt.Sprintf("【内部系统数据查询结果 - 查询对象: %s (TG ID: %d)】：该用户的系统绑定账号名为「%s」，目前的可用资产余额为 %d 花币/积分。其账号当前所处状态判定为「%s」，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。",
+						queryLabel, queryID, userInfoResp.Data.Name, userInfoResp.Data.Iv,
+						func() string {
+							if userInfoResp.Data.Lv == "c" {
+								return "封禁状态(被禁止登录)"
+							}
+							return "正常"
+						}(),
+						userInfoResp.Data.Ex)
+				}
+				log.Printf("[AI] 成功获取用户 %d (%s) 最新数据注入上下文", queryID, queryLabel)
+			} else {
+				log.Printf("[AI] 获取用户信息失败或不存在: %v", err)
+				embyBossData = fmt.Sprintf("系统（EmbyBoss）中未查到 %s (TG ID: %d) 的任何绑定数据。可能该用户尚未在系统内注册/绑定TG，或该TG ID无对应Emby账号记录。", queryLabel, queryID)
+			}
 		}
 	}
 
