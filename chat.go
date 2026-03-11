@@ -606,8 +606,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// 准备工具配置
 	var tools []Tool
 	if ch.config.AISearchEnabled {
-		modelName := strings.ToLower(ch.config.AIModel)
-		if strings.Contains(modelName, "gemini") {
+		if ch.config.AIGoogleSearchGrounding {
 			// 如果是 Gemini 系列模型，优先尝试注入其原生的 Google Search Grounding 参数
 			// 许多 OpenAI 格式的 Google 代理端支持这种隐式格式
 			tools = append(tools, Tool{

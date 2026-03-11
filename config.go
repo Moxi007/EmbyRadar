@@ -18,6 +18,7 @@ type Config struct {
 	// AI 聊天相关配置
 	AIEnabled            bool             `json:"ai_enabled"`             // 是否启用 AI 聊天
 	AISearchEnabled      bool             `json:"ai_search_enabled"`      // 是否启用连网搜索功能
+	AIGoogleSearchGrounding bool          `json:"ai_google_search_grounding"` // 是否开启原生 Gemini Google Grounding (若代理不支持会报错或失效)
 	AIBaseURL            string           `json:"ai_base_url"`            // OpenAI 兼容 API 地址
 	AIAPIKey             string           `json:"ai_api_key"`             // AI API Key
 	AIModel              string           `json:"ai_model"`               // 模型名称
@@ -54,6 +55,7 @@ func LoadConfig(filename string) (*Config, error) {
 
 				AIEnabled:         false,
 				AISearchEnabled:   true,
+				AIGoogleSearchGrounding: false,
 				AIBaseURL:         "https://api.openai.com/v1",
 				AIAPIKey:          "YOUR_AI_API_KEY_HERE",
 				AIModel:           "gpt-4o",
