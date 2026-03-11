@@ -136,11 +136,12 @@ func (ch *ChatHandler) NotifyNewEmbyUser(tgID int64, tgName string, embyName str
 	// 构建一次性消息调用 AI，赋予“系统最高权限”以防被 AI 当作伪造消息拦截
 	messages := ch.buildMessages(ch.config.TelegramChatID, "系统通报", "系统最高权限", welcomePrompt, "")
 	
-	reply, err := ch.aiClient.ChatCompletion(messages)
+	replyMsg, err := ch.aiClient.ChatCompletion(messages, nil)
 	if err != nil {
 		log.Printf("[AI] 欢迎新成员调用 AI 失败: %v", err)
 		return
 	}
+	reply := replyMsg.Content
 
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
@@ -164,11 +165,11 @@ func (ch *ChatHandler) NotifyNewEmbyUser(tgID int64, tgName string, embyName str
 	})
 
 	// 发送 AI 回复到主群聊
-	replyMsg := tgbotapi.NewMessage(ch.config.TelegramChatID, reply)
-	replyMsg.ParseMode = "Markdown"
-	if _, err := ch.bot.Send(replyMsg); err != nil {
-		replyMsg.ParseMode = ""
-		ch.bot.Send(replyMsg)
+	replyMsgText := tgbotapi.NewMessage(ch.config.TelegramChatID, reply)
+	replyMsgText.ParseMode = "Markdown"
+	if _, err := ch.bot.Send(replyMsgText); err != nil {
+		replyMsgText.ParseMode = ""
+		ch.bot.Send(replyMsgText)
 	}
 }
 
@@ -239,10 +240,15 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 			formatPrompt := "你现在是一个知识库整理助手。请将用户提供的以下内容进行提炼和格式化，使其最适合作为机器人的知识库（Wiki）供日后检索使用。" +
 				"要求：\n1. 剔除对话中的闲聊成分，只保留核心事实或步骤。\n2. 如果适合，请尽量使用结构化的 Q&A (问答)格式或条理清晰的列表格式。\n3. 直接输出整理后的内容，不要包含任何前言或解释词汇。\n\n需要整理的内容如下：\n" + content
 
-			formattedContent, err := ch.aiClient.ChatCompletion([]ChatMessage{
+			formattedMsg, err := ch.aiClient.ChatCompletion([]ChatMessage{
 				{Role: "system", Content: "你是一个专业的知识库摘要引擎。"},
 				{Role: "user", Content: formatPrompt},
-			})
+			}, nil)
+			
+			formattedContent := ""
+			if err == nil && formattedMsg != nil {
+			    formattedContent = formattedMsg.Content
+			}
 
 			if err == nil && strings.TrimSpace(formattedContent) != "" {
 				content = formattedContent
@@ -596,12 +602,80 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// 构建消息列表
 	messages := ch.buildMessages(chatID, displayRole, verifiedRole, userText, embyBossData)
 
-	// 调用 AI API
-	reply, err := ch.aiClient.ChatCompletion(messages)
-	if err != nil {
-		log.Printf("[AI] 调用 AI 失败: %v", err)
-		ch.sendReply(msg, "⚠️ AI 暂时无法回复，请稍后再试")
-		return
+	// 准备工具配置
+	var tools []Tool
+	if ch.config.AISearchEnabled {
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        "search_web",
+				Description: "当用户提问需要了解最新资讯、实时新闻或你不确定的事实时，调用此工具进行互联网搜索。传入的关键词应该是短小精准的名词或短语组合。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{
+							"type":        "string",
+							"description": "进行搜索引擎查询的关键词",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		})
+	}
+
+	// 循环处理 AI 的响应（支持多次连续工具调用）
+	var reply string
+	for i := 0; i < 5; i++ { // 最多允许连续调用5次工具
+		aiMsg, err := ch.aiClient.ChatCompletion(messages, tools)
+		if err != nil {
+			log.Printf("[AI] 调用 AI 失败: %v", err)
+			ch.sendReply(msg, "⚠️ AI 暂时无法回复，请稍后再试")
+			return
+		}
+
+		// 将 AI 的响应加入消息列表
+		messages = append(messages, *aiMsg)
+
+		// 检查是否有工具调用
+		if len(aiMsg.ToolCalls) > 0 {
+			for _, tc := range aiMsg.ToolCalls {
+				if tc.Function.Name == "search_web" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析参数失败: %v", err)
+						continue
+					}
+
+					query, ok := args["query"].(string)
+					if !ok {
+						log.Printf("[AI] 参数类型错误，query 不是 string")
+						continue
+					}
+
+					log.Printf("[AI] 【触发网络搜索】关键词: %s", query)
+					searchResult := SearchWeb(query)
+
+					// 将工具实行的结果作为 role="tool" 加回 messages
+					messages = append(messages, ChatMessage{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Name:       tc.Function.Name,
+						Content:    searchResult,
+					})
+				}
+			}
+			// 继续进行下一次请求，让 AI 总结搜索结果
+			continue
+		}
+
+		// 没有工具调用，正常返回文本
+		reply = aiMsg.Content
+		break
+	}
+
+	if reply == "" {
+		reply = "（思考了很久，不知道该说什么）"
 	}
 
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
