@@ -103,9 +103,11 @@ func parseDuckDuckGoLiteHTML(htmlContent string) string {
 	collect = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			class := getAttr(n, "class")
-			if n.Data == "a" && strings.Contains(class, "result-snippet") {
+			// 提取标题：<a class="result-link">
+			if n.Data == "a" && strings.Contains(class, "result-link") {
 				titles = append(titles, getTextContent(n))
 			} else if n.Data == "td" && strings.Contains(class, "result-snippet") {
+				// 提取摘要：<td class="result-snippet">
 				snippets = append(snippets, getTextContent(n))
 			}
 		}
