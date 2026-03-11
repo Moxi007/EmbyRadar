@@ -606,24 +606,42 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// 准备工具配置
 	var tools []Tool
 	if ch.config.AISearchEnabled {
-		currentDateStr := time.Now().Format("2006年01月")
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: ToolFunction{
-				Name:        "search_web",
-				Description: fmt.Sprintf("必须使用此工具来获取最新的资讯和新闻。当前时间是 %s，你的搜索关键词中必须主动携带 '%s' 或者具体日期作为检索词，否则你会搜到过时的旧新闻！", currentDateStr, currentDateStr),
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"query": map[string]any{
-							"type":        "string",
-							"description": fmt.Sprintf("进行搜索引擎查询的关键词。务必包含时间如 '%s' 以保证时效性。", currentDateStr),
-						},
+		modelName := strings.ToLower(ch.config.AIModel)
+		if strings.Contains(modelName, "gemini") {
+			// 如果是 Gemini 系列模型，优先尝试注入其原生的 Google Search Grounding 参数
+			// 许多 OpenAI 格式的 Google 代理端支持这种隐式格式
+			tools = append(tools, Tool{
+				Type: "google_search_retrieval",
+				GoogleSearchRetrieval: map[string]any{
+					"dynamicRetrievalConfig": map[string]any{
+						"mode": "MODE_DYNAMIC",
+						"dynamicThreshold": 0.3, // 设定搜索阈值，越低越容易触发搜索
 					},
-					"required": []string{"query"},
 				},
-			},
-		})
+			})
+			log.Printf("[AI] 检测到 Gemini 模型，启用原生 Google Search Grounding 参数...")
+		} else {
+			// 普通模型（如 GPT、Claude 等）使用自定义的 DuckDuckGo 爬虫 Function Calling
+			currentDateStr := time.Now().Format("2006年01月")
+			tools = append(tools, Tool{
+				Type: "function",
+				Function: &ToolFunction{
+					Name:        "search_web",
+					Description: fmt.Sprintf("必须使用此工具来获取最新的资讯和新闻。当前时间是 %s，你的搜索关键词中必须主动携带 '%s' 或者具体日期作为检索词，否则你会搜到过时的旧新闻！", currentDateStr, currentDateStr),
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"query": map[string]any{
+								"type":        "string",
+								"description": fmt.Sprintf("进行搜索引擎查询的关键词。务必包含时间如 '%s' 以保证时效性。", currentDateStr),
+							},
+						},
+						"required": []string{"query"},
+					},
+				},
+			})
+			log.Printf("[AI] 启用本地 DuckDuckGo search_web 工具...")
+		}
 	}
 
 	// 循环处理 AI 的响应（支持多次连续工具调用）

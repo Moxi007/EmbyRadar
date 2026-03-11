@@ -23,10 +23,13 @@ type ToolCall struct {
 	Function FunctionCall `json:"function"`
 }
 
-// Tool 表示一个可以被 AI 调用的工具
+// Tool 表示一个可以被 AI 调用的工具。为了兼容 Google Search Grounding，部分字段可为空且支持任意扩展
 type Tool struct {
-	Type     string       `json:"type"`
-	Function ToolFunction `json:"function"`
+	Type     string        `json:"type"`
+	Function *ToolFunction `json:"function,omitempty"`
+
+	// 针对 Gemini Grounding 在部分中转网关的兼容性扩展
+	GoogleSearchRetrieval any `json:"googleSearchRetrieval,omitempty"`
 }
 
 // ToolFunction 描述函数的参数结构（JSON Schema）
