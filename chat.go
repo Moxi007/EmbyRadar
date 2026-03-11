@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -605,17 +606,18 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// 准备工具配置
 	var tools []Tool
 	if ch.config.AISearchEnabled {
+		currentDateStr := time.Now().Format("2006年01月")
 		tools = append(tools, Tool{
 			Type: "function",
 			Function: ToolFunction{
 				Name:        "search_web",
-				Description: "当用户提问需要了解最新资讯、实时新闻或你不确定的事实时，调用此工具进行互联网搜索。传入的关键词应该是短小精准的名词或短语组合。",
+				Description: fmt.Sprintf("必须使用此工具来获取最新的资讯和新闻。当前时间是 %s，你的搜索关键词中必须主动携带 '%s' 或者具体日期作为检索词，否则你会搜到过时的旧新闻！", currentDateStr, currentDateStr),
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"query": map[string]any{
 							"type":        "string",
-							"description": "进行搜索引擎查询的关键词",
+							"description": fmt.Sprintf("进行搜索引擎查询的关键词。务必包含时间如 '%s' 以保证时效性。", currentDateStr),
 						},
 					},
 					"required": []string{"query"},
@@ -714,6 +716,10 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 	if systemPrompt == "" {
 		systemPrompt = "你是一个群聊助手，请保持回复简洁友好。"
 	}
+
+	// 注入当前准确时间服务器时间
+	currentTime := time.Now().Format("2006年01月02日 15:04:05")
+	systemPrompt += fmt.Sprintf("\n\n[系统硬参]：当前服务器精确时间为：%s。当用户询问时间、日期、星期几或者判断今天、明天、昨天时，请务必以此时间为基准进行回答。", currentTime)
 
 	// 动态注入最高级强制指令（针对具体的特权用户）
 	if verifiedRole != "" {
