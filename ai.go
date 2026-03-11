@@ -30,6 +30,7 @@ type Tool struct {
 
 	// 针对 Gemini Grounding 在部分中转网关的兼容性扩展
 	GoogleSearchRetrieval any `json:"googleSearchRetrieval,omitempty"`
+	GoogleSearch          any `json:"google_search,omitempty"` // 用于 Vertex AI 等端点
 }
 
 // ToolFunction 描述函数的参数结构（JSON Schema）
