@@ -606,27 +606,42 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// 准备工具配置
 	var tools []Tool
 	if ch.config.AISearchEnabled {
-		// 当开启 AISearchEnabled 时，统一下发 search_web (DuckDuckGo爬虫)
-		// 如果用户配置代理网关 Payload 覆盖，代理端会自动转为内置的 Google Grounding 或其他机制
-		currentDateStr := time.Now().Format("2006年01月")
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: &ToolFunction{
-				Name:        "search_web",
-				Description: fmt.Sprintf("必须使用此工具来获取最新的资讯和新闻。当前时间是 %s，你的搜索关键词中必须主动携带 '%s' 或者具体日期作为检索词，否则你会搜到过时的旧新闻！", currentDateStr, currentDateStr),
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"query": map[string]any{
-							"type":        "string",
-							"description": fmt.Sprintf("进行搜索引擎查询的关键词。务必包含时间如 '%s' 以保证时效性。", currentDateStr),
-						},
+		modelName := strings.ToLower(ch.config.AIModel)
+		if strings.Contains(modelName, "gemini") {
+			// 如果是 Gemini 系列模型，在开启联网时优先尝试注入其原生的 Google Search Grounding 参数
+			// 如果中转网关吃掉该参数（如 cli-proxy-api 默认过滤），则需要在网关的 payload 中二次强制注入
+			tools = append(tools, Tool{
+				Type: "google_search_retrieval",
+				GoogleSearchRetrieval: map[string]any{
+					"dynamicRetrievalConfig": map[string]any{
+						"mode": "MODE_DYNAMIC",
+						"dynamicThreshold": 0.3, 
 					},
-					"required": []string{"query"},
 				},
-			},
-		})
-		log.Printf("[AI] 启用本地 DuckDuckGo search_web 工具 (也可被代理网关 Payload 覆盖)...")
+			})
+			log.Printf("[AI] 检测到 Gemini 模型，注入原生 Google Search Grounding 参数...")
+		} else {
+			// 普通模型（如 GPT、Claude 等）使用自定义的 DuckDuckGo 爬虫 Function Calling
+			currentDateStr := time.Now().Format("2006年01月")
+			tools = append(tools, Tool{
+				Type: "function",
+				Function: &ToolFunction{
+					Name:        "search_web",
+					Description: fmt.Sprintf("必须使用此工具来获取最新的资讯和新闻。当前时间是 %s，你的搜索关键词中必须主动携带 '%s' 或者具体日期作为检索词，否则你会搜到过时的旧新闻！", currentDateStr, currentDateStr),
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"query": map[string]any{
+								"type":        "string",
+								"description": fmt.Sprintf("进行搜索引擎查询的关键词。务必包含时间如 '%s' 以保证时效性。", currentDateStr),
+							},
+						},
+						"required": []string{"query"},
+					},
+				},
+			})
+			log.Printf("[AI] 启用本地 DuckDuckGo search_web 工具...")
+		}
 	}
 
 	// 循环处理 AI 的响应（支持多次连续工具调用）
