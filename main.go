@@ -14,64 +14,63 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const messageCacheFile = "config/message_id.json"
-
 // Cache 缓存上一次发送的消息 ID 和内容，避免重复编辑消耗 API 排队
 type Cache struct {
 	MessageID int    `json:"message_id"`
 	LastText  string `json:"last_text"`
 }
 
+// GroupStatusUpdater 单个群组的状态更新器
+type GroupStatusUpdater struct {
+	bot       *tgbotapi.BotAPI
+	emby      *EmbyClient
+	group     *GroupConfig
+	cache     Cache
+	cacheFile string // 每个群组独立的缓存文件路径
+}
+
 func main() {
 	// 0. 初始化日志文件
 	initLogger()
 
-	// 1. 加载配置
-	config, err := LoadConfig("config/config.json")
+	// 1. 加载配置（新的多群组格式）
+	appConfig, err := LoadConfig("config/config.json")
 	if err != nil {
 		log.Fatalf("配置错误: %v", err)
 	}
 
-	// 2. 初始化 Emby 客户端
-	emby := NewEmbyClient(config.EmbyURL, config.EmbyAPIKey)
-
-	// 如果未配置 server_name，则自动从 Emby 获取服务器名称
-	if config.ServerName == "" {
-		if name, err := emby.GetServerName(); err == nil {
-			config.ServerName = name
-			log.Printf("自动获取服务名称: %s", name)
-		} else {
-			config.ServerName = "EMBY"
-			log.Printf("[Warn] 获取服务名称失败，使用默认名称: %v", err)
-		}
-	}
-
-	// 3. 初始化 Telegram Bot
-	bot, err := tgbotapi.NewBotAPI(config.TelegramBotToken)
+	// 2. 初始化 Telegram Bot
+	bot, err := tgbotapi.NewBotAPI(appConfig.Global.TelegramBotToken)
 	if err != nil {
 		log.Fatalf("初始化 Telegram Bot 失败: %v", err)
 	}
 	bot.Debug = false
 	log.Printf("授权成功，Bot: %s", bot.Self.UserName)
 
-	// 4. 初始化 AI 聊天模块（如果启用）
-	if config.AIEnabled {
-		aiClient := NewAIClient(config)
-		kb := NewKnowledgeBase(config.AIKnowledgeDir)
-		if err := kb.Load(); err != nil {
-			log.Printf("[Warn] 加载知识库失败: %v", err)
+	// 3. 初始化 AI 聊天模块（检查是否有任意群组启用了 AI）
+	hasAIEnabled := false
+	for _, g := range appConfig.Groups {
+		if g.AIEnabled {
+			hasAIEnabled = true
+			break
 		}
-		ctxManager := NewContextManager(config.AIMaxContext)
-		ebClient := NewEmbyBossClient(config.EmbyBossAPIUrl, config.EmbyBossAPIToken)
-		chatHandler := NewChatHandler(bot, aiClient, ctxManager, config, kb, emby, ebClient)
+	}
+	if hasAIEnabled {
+		aiClient := NewAIClient(&appConfig.Global)
+		ctxManager := NewContextManager(appConfig.Global.AIMaxContext)
+		chatHandler := NewChatHandler(bot, aiClient, ctxManager, appConfig)
 
 		// 在独立 goroutine 中启动消息监听
 		go chatHandler.StartListening()
 
-		// 在独立 goroutine 中启动 Webhook 监听
-		go chatHandler.StartWebhookServer()
+		// 为每个启用了 AI 且配置了 webhook_port 的群组启动独立 Webhook
+		for _, g := range appConfig.Groups {
+			if g.AIEnabled && g.WebhookPort > 0 {
+				go chatHandler.StartGroupWebhook(g)
+			}
+		}
 
-		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", config.AIModel)
+		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", appConfig.Global.AIModel)
 
 		// 注册快捷命令菜单
 		setBotCommands(bot)
@@ -79,42 +78,28 @@ func main() {
 		log.Printf("[AI] AI 聊天模块未启用")
 	}
 
-	// 5. 读取上一次置顶消息的缓存 ID
-	cache := loadCache()
-
-	// 6. 设置定时器
-	ticker := time.NewTicker(time.Duration(config.UpdateInterval) * time.Second)
-	defer ticker.Stop()
+	// 4. 启动所有群组的状态监控（每个群组独立 goroutine 和定时器）
+	StartAllStatusUpdaters(bot, appConfig)
 
 	// 监听退出信号以便优雅退出
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// 立即执行一次
-	updateStatus(bot, emby, config, &cache)
-
-	for {
-		select {
-		case <-ticker.C:
-			updateStatus(bot, emby, config, &cache)
-		case sig := <-sigCh:
-			log.Printf("收到退出信号 %v，程序退出", sig)
-			return
-		}
-	}
+	sig := <-sigCh
+	log.Printf("收到退出信号 %v，程序退出", sig)
 }
 
-// updateStatus 获取数据并发送或编辑消息
-func updateStatus(bot *tgbotapi.BotAPI, emby *EmbyClient, config *Config, cache *Cache) {
+// updateStatus 获取 Emby 数据并发送或编辑该群组的置顶状态消息
+func (gsu *GroupStatusUpdater) updateStatus() {
 	// 获取数据
-	activeSessions, err := emby.GetActiveSessions()
+	activeSessions, err := gsu.emby.GetActiveSessions()
 	if err != nil {
-		log.Printf("[Err] 获取监控数据失败(Sessions): %v", err)
+		log.Printf("[Err] 群组 %d 获取监控数据失败(Sessions): %v", gsu.group.TelegramChatID, err)
 		return
 	}
-	totalUsers, err := emby.GetTotalUsers()
+	totalUsers, err := gsu.emby.GetTotalUsers()
 	if err != nil {
-		log.Printf("[Err] 获取监控数据失败(Users): %v", err)
+		log.Printf("[Err] 群组 %d 获取监控数据失败(Users): %v", gsu.group.TelegramChatID, err)
 		return
 	}
 
@@ -124,76 +109,122 @@ func updateStatus(bot *tgbotapi.BotAPI, emby *EmbyClient, config *Config, cache 
 			"🎥 正在观看：*%d*\n"+
 			"👤 用户总数：*%d*\n"+
 			"📅 更新时间：*%s*",
-		config.ServerName,
+		gsu.group.ServerName,
 		activeSessions,
 		totalUsers,
 		time.Now().Format("15:04"),
 	)
 
 	// 如果内容没有改变，不要发送编辑请求以避免 rate limit
-	if cache.LastText == text {
+	if gsu.cache.LastText == text {
 		return
 	}
 
-	if cache.MessageID == 0 {
+	if gsu.cache.MessageID == 0 {
 		// 发送新消息并置顶
-		msg := tgbotapi.NewMessage(config.TelegramChatID, text)
+		msg := tgbotapi.NewMessage(gsu.group.TelegramChatID, text)
 		msg.ParseMode = "Markdown"
-		sentMsg, err := bot.Send(msg)
+		sentMsg, err := gsu.bot.Send(msg)
 		if err != nil {
-			log.Printf("[Err] 发送初始消息失败: %v", err)
+			log.Printf("[Err] 群组 %d 发送初始消息失败: %v", gsu.group.TelegramChatID, err)
 			return
 		}
-		cache.MessageID = sentMsg.MessageID
-		cache.LastText = text
-		saveCache(*cache)
+		gsu.cache.MessageID = sentMsg.MessageID
+		gsu.cache.LastText = text
+		saveCacheToFile(gsu.cache, gsu.cacheFile)
 
-		// 置顶消息
+		// 置顶消息，静默置顶不打扰群员
 		pinConfig := tgbotapi.PinChatMessageConfig{
-			ChatID:              config.TelegramChatID,
+			ChatID:              gsu.group.TelegramChatID,
 			MessageID:           sentMsg.MessageID,
-			DisableNotification: true, // 静默置顶，不打扰群员
+			DisableNotification: true,
 		}
-		if _, err := bot.Request(pinConfig); err != nil {
-			log.Printf("[Warn] 置顶消息失败 (请确保机器人有管理员权限): %v", err)
+		if _, err := gsu.bot.Request(pinConfig); err != nil {
+			log.Printf("[Warn] 群组 %d 置顶消息失败 (请确保机器人有管理员权限): %v", gsu.group.TelegramChatID, err)
 		} else {
-			log.Printf("成功发送并置顶状态消息 ID: %d", sentMsg.MessageID)
+			log.Printf("群组 %d 成功发送并置顶状态消息 ID: %d", gsu.group.TelegramChatID, sentMsg.MessageID)
 		}
 
 	} else {
 		// 编辑已存在的置顶消息
-		editMsg := tgbotapi.NewEditMessageText(config.TelegramChatID, cache.MessageID, text)
+		editMsg := tgbotapi.NewEditMessageText(gsu.group.TelegramChatID, gsu.cache.MessageID, text)
 		editMsg.ParseMode = "Markdown"
 
-		_, err := bot.Send(editMsg)
+		_, err := gsu.bot.Send(editMsg)
 		if err != nil {
-			log.Printf("[Err] 编辑消息状态失败 (ID: %d): %v", cache.MessageID, err)
-			// 如果因为消息被删除等原因导致找不到该消息，重置 ID
-			cache.MessageID = 0
-			saveCache(*cache)
+			log.Printf("[Err] 群组 %d 编辑消息状态失败 (ID: %d): %v", gsu.group.TelegramChatID, gsu.cache.MessageID, err)
+			// 消息被删除等原因导致找不到该消息时，重置 ID
+			gsu.cache.MessageID = 0
+			saveCacheToFile(gsu.cache, gsu.cacheFile)
 		} else {
-			// 修改成功
-			cache.LastText = text
-			saveCache(*cache)
+			gsu.cache.LastText = text
+			saveCacheToFile(gsu.cache, gsu.cacheFile)
 		}
 	}
 }
 
-// loadCache 从本地文件加载缓存的 Message ID
-func loadCache() Cache {
+// StartAllStatusUpdaters 为所有群组启动独立的状态更新 goroutine
+// 仅当群组配置了 EmbyURL 时才启动状态更新
+func StartAllStatusUpdaters(bot *tgbotapi.BotAPI, appConfig *AppConfig) {
+	for _, g := range appConfig.Groups {
+		// 未配置 Emby 地址的群组跳过状态监控
+		if g.EmbyURL == "" {
+			continue
+		}
+
+		emby := NewEmbyClient(g.EmbyURL, g.EmbyAPIKey)
+
+		// 如果未配置 server_name，自动从 Emby 获取
+		if g.ServerName == "" {
+			if name, err := emby.GetServerName(); err == nil {
+				g.ServerName = name
+				log.Printf("群组 %d 自动获取服务名称: %s", g.TelegramChatID, name)
+			} else {
+				g.ServerName = "EMBY"
+				log.Printf("[Warn] 群组 %d 获取服务名称失败，使用默认名称: %v", g.TelegramChatID, err)
+			}
+		}
+
+		cacheFile := fmt.Sprintf("config/message_id_%d.json", g.TelegramChatID)
+		gsu := &GroupStatusUpdater{
+			bot:       bot,
+			emby:      emby,
+			group:     g,
+			cache:     loadCacheFromFile(cacheFile),
+			cacheFile: cacheFile,
+		}
+
+		// 立即执行一次
+		gsu.updateStatus()
+
+		// 启动独立的定时器 goroutine，各群组互不影响
+		go func(updater *GroupStatusUpdater) {
+			ticker := time.NewTicker(time.Duration(updater.group.UpdateInterval) * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				updater.updateStatus()
+			}
+		}(gsu)
+
+		log.Printf("群组 %d 状态监控已启动 (间隔: %ds)", g.TelegramChatID, g.UpdateInterval)
+	}
+}
+
+// loadCacheFromFile 从指定文件加载缓存的消息 ID 和文本状态
+func loadCacheFromFile(filename string) Cache {
 	var cache Cache
-	data, err := os.ReadFile(messageCacheFile)
+	data, err := os.ReadFile(filename)
 	if err == nil {
 		json.Unmarshal(data, &cache)
 	}
 	return cache
 }
 
-// saveCache 保存 Message ID 和文本状态到本地文件
-func saveCache(cache Cache) {
+// saveCacheToFile 保存消息 ID 和文本状态到指定缓存文件
+func saveCacheToFile(cache Cache, filename string) {
 	data, err := json.Marshal(cache)
 	if err == nil {
-		os.WriteFile(messageCacheFile, data, 0644)
+		os.WriteFile(filename, data, 0644)
 	}
 }
 

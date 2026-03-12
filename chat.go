@@ -14,61 +14,132 @@ import (
 // ChatHandler 处理群聊消息与 AI 回复
 type ChatHandler struct {
 	bot        *tgbotapi.BotAPI
-	aiClient   *AIClient
-	ctxManager *ContextManager
-	embyClient *EmbyClient
-	ebClient   *EmbyBossClient
-	kb         *KnowledgeBase
-	config     *Config
+	aiClient   *AIClient                 // 全局共享的 AI 客户端
+	ctxManager *ContextManager           // 全局共享，内部按 chatID 隔离
+	appConfig  *AppConfig                // 全局应用配置
+	kbMap      map[int64]*KnowledgeBase  // chatID → 独立知识库
+	embyMap    map[int64]*EmbyClient     // chatID → 独立 Emby 客户端
+	ebMap      map[int64]*EmbyBossClient // chatID → 独立 EmbyBoss 客户端
 }
 
-// NewChatHandler 创建聊天处理器
-func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *ContextManager, config *Config, kb *KnowledgeBase, embyClient *EmbyClient, ebClient *EmbyBossClient) *ChatHandler {
-	return &ChatHandler{
+// NewChatHandler 创建聊天处理器，遍历所有群组配置初始化各群组的独立客户端
+func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *ContextManager, appConfig *AppConfig) *ChatHandler {
+	ch := &ChatHandler{
 		bot:        bot,
 		aiClient:   aiClient,
 		ctxManager: ctxManager,
-		embyClient: embyClient,
-		ebClient:   ebClient,
-		kb:         kb,
-		config:     config,
+		appConfig:  appConfig,
+		kbMap:      make(map[int64]*KnowledgeBase),
+		embyMap:    make(map[int64]*EmbyClient),
+		ebMap:      make(map[int64]*EmbyBossClient),
 	}
+
+	// 遍历所有群组配置，为每个群组初始化独立的客户端实例
+	for _, g := range appConfig.Groups {
+		chatID := g.TelegramChatID
+
+		// 初始化 Emby 客户端（仅当配置了 EmbyURL 时）
+		if g.EmbyURL != "" {
+			ch.embyMap[chatID] = NewEmbyClient(g.EmbyURL, g.EmbyAPIKey)
+		}
+
+		// 初始化 EmbyBoss 客户端（仅当配置了 EmbyBossAPIToken 时）
+		if g.EmbyBossAPIToken != "" {
+			ch.ebMap[chatID] = NewEmbyBossClient(g.EmbyBossAPIUrl, g.EmbyBossAPIToken)
+		}
+
+		// 初始化知识库实例并加载
+		kb := NewKnowledgeBase(g.AIKnowledgeDir)
+		if err := kb.Load(); err != nil {
+			log.Printf("[知识库] 群组 %d 加载知识库失败: %v", chatID, err)
+		}
+		ch.kbMap[chatID] = kb
+	}
+
+	return ch
 }
 
 // getCurrencyName 动态获取货币名称，优先从 EmbyBoss API 获取，
 // 失败时回退到本地配置值，确保前后端货币名称一致
-func (ch *ChatHandler) getCurrencyName() string {
-	if ch.ebClient != nil {
-		if name, err := ch.ebClient.GetCurrencyName(); err == nil {
+func (ch *ChatHandler) getCurrencyName(chatID int64) string {
+	if eb := ch.ebMap[chatID]; eb != nil {
+		if name, err := eb.GetCurrencyName(); err == nil {
 			return name
 		}
 		log.Printf("[ChatHandler] 从 EmbyBoss API 获取货币名称失败，回退到本地配置值")
 	}
-	return ch.config.EmbyBossCurrencyName
+	// 回退到群组配置中的本地货币名称
+	if g := ch.appConfig.GetGroupConfig(chatID); g != nil {
+		return g.EmbyBossCurrencyName
+	}
+	return "鸡蛋"
 }
 
 // StartListening 启动消息监听（长轮询）
 func (ch *ChatHandler) StartListening() {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
+	// 显式声明需要接收 my_chat_member 更新，用于检测 Bot 被添加到群组的事件
+	u.AllowedUpdates = []string{"message", "my_chat_member"}
 
 	updates := ch.bot.GetUpdatesChan(u)
 
 	log.Printf("[AI] 消息监听已启动，等待群聊消息...")
 
 	for update := range updates {
+		// 处理 Bot 被添加到群组的事件（入群限制）
+		if update.MyChatMember != nil {
+			ch.handleMyChatMember(update.MyChatMember)
+			continue
+		}
+
 		if update.Message == nil {
 			continue
 		}
 
-		// 处理管理员命令
+		// 群组路由检查：非私聊消息必须来自已配置的群组
+		if update.Message.Chat.Type != "private" {
+			if !ch.appConfig.IsAuthorizedGroup(update.Message.Chat.ID) {
+				continue // 忽略未配置群组的消息
+			}
+		}
+
+		// 处理管理员命令（无论 AI 是否启用都处理）
 		if ch.handleCommand(update.Message) {
 			continue
 		}
 
-		// 判断是否需要 AI 回复
-		if ch.shouldRespond(update.Message) {
+		// AI 开关检查：仅当群组启用了 AI 时才处理 AI 回复
+		group := ch.appConfig.GetGroupConfig(update.Message.Chat.ID)
+		aiEnabled := true // 私聊默认启用
+		if group != nil {
+			aiEnabled = group.AIEnabled
+		}
+
+		if aiEnabled && ch.shouldRespond(update.Message) {
 			go ch.handleAIResponse(update.Message)
+		}
+	}
+}
+
+// handleMyChatMember 处理 Bot 成员状态变更事件，实现入群限制
+func (ch *ChatHandler) handleMyChatMember(update *tgbotapi.ChatMemberUpdated) {
+	newStatus := update.NewChatMember.Status
+	chatID := update.Chat.ID
+
+	// 检查 Bot 是否被添加到群组（状态变为 member/administrator/restricted）
+	if newStatus == "member" || newStatus == "administrator" || newStatus == "restricted" {
+		if !ch.appConfig.IsAuthorizedGroup(chatID) {
+			// 未授权群组，自动退出
+			log.Printf("[安全] Bot 被添加到未授权群组 (chat_id: %d)，操作者: %s (ID: %d)，正在自动退出...",
+				chatID, update.From.FirstName, update.From.ID)
+
+			leaveConfig := tgbotapi.LeaveChatConfig{ChatID: chatID}
+			if _, err := ch.bot.Request(leaveConfig); err != nil {
+				log.Printf("[安全] 退出未授权群组失败 (chat_id: %d): %v", chatID, err)
+			} else {
+				log.Printf("[安全] 已成功退出未授权群组 (chat_id: %d)", chatID)
+			}
 		}
 	}
 }
@@ -80,9 +151,11 @@ type WebhookPayload struct {
 	EmbyName string `json:"emby_name"`
 }
 
-// StartWebhookServer 启动内部 HTTP 服务接收 EmbyBoss 的推送
-func (ch *ChatHandler) StartWebhookServer() {
-	http.HandleFunc("/webhook/new_user", func(w http.ResponseWriter, r *http.Request) {
+// StartGroupWebhook 为单个群组启动独立的 Webhook HTTP 服务
+// 每个群组使用独立端口和独立的 http.Server（不使用 DefaultServeMux）
+func (ch *ChatHandler) StartGroupWebhook(group *GroupConfig) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/webhook/new_user", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -94,29 +167,35 @@ func (ch *ChatHandler) StartWebhookServer() {
 			return
 		}
 
-		log.Printf("[Webhook] 收到新用户注册推送: TG ID=%d, TG Name=%s, Emby Name=%s", payload.TgID, payload.TgName, payload.EmbyName)
-		
-		// 异步处理新用户欢迎逻辑
-		go ch.NotifyNewEmbyUser(payload.TgID, payload.TgName, payload.EmbyName)
+		log.Printf("[Webhook] 群组 %d 收到新用户注册推送: TG ID=%d, TG Name=%s, Emby Name=%s",
+			group.TelegramChatID, payload.TgID, payload.TgName, payload.EmbyName)
+
+		// 异步处理新用户欢迎逻辑，传入具体群组配置
+		go ch.NotifyNewEmbyUser(group, payload.TgID, payload.TgName, payload.EmbyName)
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
-	addr := fmt.Sprintf("0.0.0.0:%d", ch.config.WebhookPort)
-	log.Printf("[Webhook] 开始监听端口 %s 用于接收内部推送...", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Printf("[Err] Webhook 服务启动失败: %v", err)
+	addr := fmt.Sprintf("0.0.0.0:%d", group.WebhookPort)
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	log.Printf("[Webhook] 群组 %d 开始监听端口 %d 用于接收内部推送...", group.TelegramChatID, group.WebhookPort)
+	if err := server.ListenAndServe(); err != nil {
+		log.Printf("[Err] 群组 %d Webhook 服务启动失败 (端口 %d): %v", group.TelegramChatID, group.WebhookPort, err)
 	}
 }
 
 // NotifyNewEmbyUser 在发送贴纸并调用 AI 欢迎新主子/平民
-func (ch *ChatHandler) NotifyNewEmbyUser(tgID int64, tgName string, embyName string) {
+func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName string, embyName string) {
 	tgName = cleanMarkdownName(tgName)
 
 	// 发送预设好的贴纸（如果在配置中设置了）
-	if ch.config.WelcomeStickerID != "" {
-		stickerMsg := tgbotapi.NewSticker(ch.config.TelegramChatID, tgbotapi.FileID(ch.config.WelcomeStickerID))
+	if group.WelcomeStickerID != "" {
+		stickerMsg := tgbotapi.NewSticker(group.TelegramChatID, tgbotapi.FileID(group.WelcomeStickerID))
 		if _, err := ch.bot.Send(stickerMsg); err != nil {
 			log.Printf("[AI] 发送欢迎贴纸失败: %v", err)
 		}
@@ -124,19 +203,17 @@ func (ch *ChatHandler) NotifyNewEmbyUser(tgID int64, tgName string, embyName str
 
 	// 触发 AI 的欢迎语
 	displayRole := fmt.Sprintf("[%s](tg://user?id=%d)", tgName, tgID)
-	
+
 	welcomePrompt := ""
 	if embyName != "" {
-		// 如果配置文件中的内容没有包含 %s，fmt.Sprintf 可能会报错或行为异常，但这取决于配置的准确性，
-		// 通常应当指导用户保留原有的占位符结构
-		welcomePrompt = fmt.Sprintf(ch.config.WelcomeEmbyPrompt, displayRole, embyName)
+		welcomePrompt = fmt.Sprintf(group.WelcomeEmbyPrompt, displayRole, embyName)
 	} else {
-		welcomePrompt = fmt.Sprintf(ch.config.WelcomeCodePrompt, displayRole)
+		welcomePrompt = fmt.Sprintf(group.WelcomeCodePrompt, displayRole)
 	}
 
-	// 构建一次性消息调用 AI，赋予“系统最高权限”以防被 AI 当作伪造消息拦截
-	messages := ch.buildMessages(ch.config.TelegramChatID, "系统通报", "系统最高权限", welcomePrompt, "")
-	
+	// 构建一次性消息调用 AI，赋予"系统最高权限"以防被 AI 当作伪造消息拦截
+	messages := ch.buildMessages(group.TelegramChatID, "系统通报", "系统最高权限", welcomePrompt, "")
+
 	replyMsg, err := ch.aiClient.ChatCompletion(messages, nil)
 	if err != nil {
 		log.Printf("[AI] 欢迎新成员调用 AI 失败: %v", err)
@@ -156,17 +233,17 @@ func (ch *ChatHandler) NotifyNewEmbyUser(tgID int64, tgName string, embyName str
 	// === 脱敏结束 ===
 
 	// 保存上下文让 AI 记住这个新来的
-	ch.ctxManager.AddMessage(ch.config.TelegramChatID, ChatMessage{
+	ch.ctxManager.AddMessage(group.TelegramChatID, ChatMessage{
 		Role:    "user",
 		Content: fmt.Sprintf("系统通报: %s", welcomePrompt),
 	})
-	ch.ctxManager.AddMessage(ch.config.TelegramChatID, ChatMessage{
+	ch.ctxManager.AddMessage(group.TelegramChatID, ChatMessage{
 		Role:    "assistant",
 		Content: reply,
 	})
 
-	// 发送 AI 回复到主群聊
-	replyMsgText := tgbotapi.NewMessage(ch.config.TelegramChatID, reply)
+	// 发送 AI 回复到对应群组
+	replyMsgText := tgbotapi.NewMessage(group.TelegramChatID, reply)
 	replyMsgText.ParseMode = "Markdown"
 	if _, err := ch.bot.Send(replyMsgText); err != nil {
 		replyMsgText.ParseMode = ""
@@ -184,7 +261,12 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 	case "reload_kb":
 		// 热重载知识库（仅管理员可用）
 		if ch.isAdmin(msg) {
-			if err := ch.kb.Reload(); err != nil {
+			kb := ch.kbMap[msg.Chat.ID]
+			if kb == nil {
+				ch.sendReply(msg, "❌ 当前群组未配置知识库")
+				return true
+			}
+			if err := kb.Reload(); err != nil {
 				ch.sendReply(msg, fmt.Sprintf("❌ 重载知识库失败: %v", err))
 			} else {
 				ch.sendReply(msg, "✅ 知识库已重新加载")
@@ -195,7 +277,12 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 	case "kb_list":
 		// 列出所有知识库条目
 		if ch.isAdmin(msg) {
-			entries, err := ch.kb.ListEntries()
+			kb := ch.kbMap[msg.Chat.ID]
+			if kb == nil {
+				ch.sendReply(msg, "❌ 当前群组未配置知识库")
+				return true
+			}
+			entries, err := kb.ListEntries()
 			if err != nil {
 				ch.sendReply(msg, fmt.Sprintf("❌ 获取知识库列表失败: %v", err))
 				return true
@@ -211,6 +298,12 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 	case "kb_add":
 		// 添加知识库条目
 		if ch.isAdmin(msg) {
+			kb := ch.kbMap[msg.Chat.ID]
+			if kb == nil {
+				ch.sendReply(msg, "❌ 当前群组未配置知识库")
+				return true
+			}
+
 			args := strings.TrimSpace(msg.CommandArguments())
 			var name, content string
 
@@ -245,10 +338,10 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 				{Role: "system", Content: "你是一个专业的知识库摘要引擎。"},
 				{Role: "user", Content: formatPrompt},
 			}, nil)
-			
+
 			formattedContent := ""
 			if err == nil && formattedMsg != nil {
-			    formattedContent = formattedMsg.Content
+				formattedContent = formattedMsg.Content
 			}
 
 			if err == nil && strings.TrimSpace(formattedContent) != "" {
@@ -257,7 +350,8 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 				log.Printf("[AI] 格式化知识库失败，将使用原始文本: %v", err)
 			}
 
-			if err := ch.kb.AddEntry(name, content); err != nil {
+			isNew, err := kb.MergeEntry(name, content, ch.aiClient)
+			if err != nil {
 				if sentMsg.MessageID != 0 {
 					editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, fmt.Sprintf("❌ 添加知识库条目失败: %v", err))
 					ch.bot.Send(editMsg)
@@ -265,7 +359,12 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 					ch.sendReply(msg, fmt.Sprintf("❌ 添加知识库条目失败: %v", err))
 				}
 			} else {
-				successText := fmt.Sprintf("✅ 成功添加知识库条目: `%s`\n\n**内容预览:**\n%s", name, content)
+				var successText string
+				if isNew {
+					successText = fmt.Sprintf("✅ 成功创建新知识库条目: `%s`\n\n**内容预览:**\n%s", name, content)
+				} else {
+					successText = fmt.Sprintf("✅ 已合并到现有知识库条目: `%s`\n\n**内容预览:**\n%s", name, content)
+				}
 				if len(successText) > 4000 {
 					successText = successText[:3900] + "...\n(内容过长已折叠)"
 				}
@@ -286,13 +385,19 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 	case "kb_del":
 		// 删除知识库条目，用法: /kb_del <名称>
 		if ch.isAdmin(msg) {
+			kb := ch.kbMap[msg.Chat.ID]
+			if kb == nil {
+				ch.sendReply(msg, "❌ 当前群组未配置知识库")
+				return true
+			}
+
 			name := strings.TrimSpace(msg.CommandArguments())
 			if name == "" {
 				ch.sendReply(msg, "💡 用法: `/kb_del <条目名称>`\n可以通过 `/kb_list` 查看现有条目。")
 				return true
 			}
 
-			if err := ch.kb.DeleteEntry(name); err != nil {
+			if err := kb.DeleteEntry(name); err != nil {
 				ch.sendReply(msg, fmt.Sprintf("❌ 删除条目失败: %v", err))
 			} else {
 				ch.sendReply(msg, fmt.Sprintf("✅ 成功删除知识库条目: `%s`", name))
@@ -369,10 +474,11 @@ func (ch *ChatHandler) shouldRespond(msg *tgbotapi.Message) bool {
 		}
 	}
 
-	// 检查关键词触发
-	if len(ch.config.AITriggerKeywords) > 0 {
+	// 从群组配置获取触发关键词
+	group := ch.appConfig.GetGroupConfig(msg.Chat.ID)
+	if group != nil && len(group.AITriggerKeywords) > 0 {
 		lowerText := strings.ToLower(msg.Text)
-		for _, keyword := range ch.config.AITriggerKeywords {
+		for _, keyword := range group.AITriggerKeywords {
 			if strings.Contains(lowerText, strings.ToLower(keyword)) {
 				return true
 			}
@@ -391,6 +497,12 @@ func cleanMarkdownName(name string) string {
 
 // handleAIResponse 处理 AI 回复逻辑
 func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
+	// 根据 chatID 获取群组配置，未匹配时回退到第一个群组（私聊场景等）
+	group := ch.appConfig.GetGroupConfig(msg.Chat.ID)
+	if group == nil {
+		group = ch.appConfig.Groups[0]
+	}
+
 	// 提取用户消息文本
 	userText := msg.Text
 
@@ -420,7 +532,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			}
 		}
 
-		userText = fmt.Sprintf("（引用了 %s 的话：“%s”）\n我的回复/问题是：%s", replySender, replyText, userText)
+		userText = fmt.Sprintf("（引用了 %s 的话：\u201c%s\u201d）\n我的回复/问题是：%s", replySender, replyText, userText)
 	}
 	// === 引用处理结束 ===
 
@@ -440,15 +552,13 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		senderID = msg.SenderChat.ID
 		userName = cleanMarkdownName(msg.SenderChat.Title)
 
-		// 如果 SenderChat 的 ID 和当前群组一致，说明是本群的“匿名管理员”
+		// 如果 SenderChat 的 ID 和当前群组一致，说明是本群的"匿名管理员"
 		if senderID == msg.Chat.ID {
-			// 提取有可能存在的匿名头衔
 			memberTitle := "匿名管理员"
 			if msg.AuthorSignature != "" {
 				memberTitle = msg.AuthorSignature
 			}
 
-			// 尝试组装跳转回本群的链接
 			var groupLink string
 			if msg.SenderChat.UserName != "" {
 				groupLink = fmt.Sprintf("https://t.me/%s", msg.SenderChat.UserName)
@@ -470,7 +580,6 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			if msg.SenderChat.UserName != "" {
 				displayRole = fmt.Sprintf("[%s](https://t.me/%s)", userName, msg.SenderChat.UserName)
 			} else {
-				// 私密频道通过特殊链接跳转 (移除 -100 前缀)
 				chanIDStr := fmt.Sprintf("%d", senderID)
 				if strings.HasPrefix(chanIDStr, "-100") {
 					chanIDStr = chanIDStr[4:]
@@ -515,10 +624,10 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		displayRole = "未知用户"
 	}
 
-	// 检查 config.json 是否预设了该 ID 的特定身份 (覆盖之前的判定)
+	// 检查群组配置中是否预设了该 ID 的特定身份（覆盖之前的判定）
 	var verifiedRole string
-	if senderID != 0 && ch.config.AIRoles != nil {
-		if roleName, exists := ch.config.AIRoles[senderID]; exists {
+	if senderID != 0 && group.AIRoles != nil {
+		if roleName, exists := group.AIRoles[senderID]; exists {
 			displayRole = fmt.Sprintf("[%s](tg://user?id=%d)", roleName, senderID)
 			verifiedRole = roleName
 		}
@@ -536,14 +645,13 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 	}
 
-	if needsQuery && ch.ebClient != nil {
+	if needsQuery && ch.ebMap[chatID] != nil {
 		// 优先判断：如果是回复了某人的消息并且在问"他/她"的信息，查被回复者
 		// 否则查发消息的人自己
 		queryID := senderID
 		queryLabel := "自己"
 
 		if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
-			// 检测是否在询问"他/她/对方"的信息（而不是"我的"）
 			askAboutOther := false
 			otherKeywords := []string{"他的", "她的", "他", "她", "这个人", "此人", "对方", "看一下", "看看", "查一下", "查查"}
 			for _, ok := range otherKeywords {
@@ -552,7 +660,6 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 					break
 				}
 			}
-			// 如果没有明确说"我的"，且回复了别人消息，默认查被回复者
 			myKeywords := []string{"我的", "我有", "我还"}
 			askAboutSelf := false
 			for _, mk := range myKeywords {
@@ -575,8 +682,8 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		if queryID != 0 {
 			log.Printf("[AI] 检测到询问用户(%d: %s)的资产/状态，正在通过 API 请求 EmbyBoss...", queryID, queryLabel)
 			// 动态获取货币名称，优先使用 API 返回值，失败时回退到本地配置
-			currencyName := ch.getCurrencyName()
-			userInfoResp, err := ch.ebClient.GetUserInfo(queryID)
+			currencyName := ch.getCurrencyName(chatID)
+			userInfoResp, err := ch.ebMap[chatID].GetUserInfo(queryID)
 			if err == nil && userInfoResp != nil {
 				if queryID == senderID {
 					embyBossData = userInfoResp.FormatForAI(currencyName)
@@ -605,18 +712,17 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 
 	// 准备工具配置
 	var tools []Tool
-	if ch.config.AISearchEnabled {
-		modelName := strings.ToLower(ch.config.AIModel)
+	if group.AISearchEnabled {
+		modelName := strings.ToLower(ch.appConfig.Global.AIModel)
 		if strings.Contains(modelName, "gemini") {
-			// 如果是 Gemini 系列模型，注入原生 Google Search Grounding 参数
-			// 使用 Vertex AI 兼容的 google_search 格式
+			// Gemini 系列模型注入原生 Google Search Grounding 参数
 			tools = append(tools, Tool{
 				Type:         "google_search",
 				GoogleSearch: map[string]any{},
 			})
 			log.Printf("[AI] 检测到 Gemini 模型，注入原生 Google Search Grounding 参数...")
 		} else {
-			// 普通模型（如 GPT、Claude 等）使用自定义的 DuckDuckGo 爬虫 Function Calling
+			// 普通模型使用自定义的 DuckDuckGo 爬虫 Function Calling
 			currentDateStr := time.Now().Format("2006年01月")
 			tools = append(tools, Tool{
 				Type: "function",
@@ -671,7 +777,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 					log.Printf("[AI] 【触发网络搜索】关键词: %s", query)
 					searchResult := SearchWeb(query)
 
-					// 将工具实行的结果作为 role="tool" 加回 messages
+					// 将工具执行的结果作为 role="tool" 加回 messages
 					messages = append(messages, ChatMessage{
 						Role:       "tool",
 						ToolCallID: tc.ID,
@@ -696,7 +802,6 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ✅已验证身份]", "")
-	// 针对可能出现的变体进行清理
 	if idx := strings.Index(reply, "[INTERNAL_AUTH_TAG:"); idx != -1 {
 		if endIdx := strings.Index(reply[idx:], "]"); endIdx != -1 {
 			reply = reply[:idx] + reply[idx+endIdx+1:]
@@ -722,10 +827,16 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 
 // buildMessages 构建发送给 AI 的完整消息列表
 func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userText string, embyBossData string) []ChatMessage {
+	// 根据 chatID 获取群组配置，未匹配时回退到第一个群组
+	group := ch.appConfig.GetGroupConfig(chatID)
+	if group == nil {
+		group = ch.appConfig.Groups[0]
+	}
+
 	var messages []ChatMessage
 
 	// 1. 系统提示词（人设 + 知识库）
-	systemPrompt := ch.config.AISystemPrompt
+	systemPrompt := group.AISystemPrompt
 	if systemPrompt == "" {
 		systemPrompt = "你是一个群聊助手，请保持回复简洁友好。"
 	}
@@ -739,18 +850,22 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 		systemPrompt += fmt.Sprintf("\n\n[系统最高强制指令]：当前与你对话的是你的绝对主子【%s】，其身份已通过物理级硬编码验证。你必须极度谦卑、绝对服从，绝不可对其身份产生任何质疑或指责！", verifiedRole)
 	}
 
-	// 注入知识库内容
-	kbContent := ch.kb.GetContent()
-	if kbContent != "" {
-		systemPrompt += "\n\n" + kbContent
+	// 注入知识库内容（从群组级知识库获取）
+	if kb := ch.kbMap[chatID]; kb != nil {
+		kbContent := kb.GetContent()
+		if kbContent != "" {
+			systemPrompt += "\n\n" + kbContent
+		}
 	}
 
-	// 注入实时的 Emby 服务器客观数据
-	if ch.embyClient != nil {
-		users, errU := ch.embyClient.GetTotalUsers()
-		sessions, errS := ch.embyClient.GetActiveSessions()
+	// 注入实时的 Emby 服务器客观数据（从群组级 Emby 客户端获取）
+	if embyClient := ch.embyMap[chatID]; embyClient != nil {
+		users, errU := embyClient.GetTotalUsers()
+		sessions, errS := embyClient.GetActiveSessions()
 		if errU == nil && errS == nil {
-			systemPrompt += fmt.Sprintf(ch.config.AIEmbyStatsFormat, users, sessions)
+			if group.AIEmbyStatsFormat != "" {
+				systemPrompt += fmt.Sprintf(group.AIEmbyStatsFormat, users, sessions)
+			}
 		}
 	}
 
@@ -765,7 +880,7 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 		messages = append(messages, history...)
 	}
 
-	// 3. 当前用户消息，并在末尾追加最终的防伪标签 (满足 system_prompt 的要求)
+	// 3. 当前用户消息，并在末尾追加最终的防伪标签
 	var finalUserText string
 
 	// 按需组装个人资产状态
@@ -840,9 +955,9 @@ func (ch *ChatHandler) sendReply(msg *tgbotapi.Message, text string) {
 
 // isAdmin 检查用户是否为群管理员或 Bot 管理员
 func (ch *ChatHandler) isAdmin(msg *tgbotapi.Message) bool {
-	// 如果配置文件指定了专属管理员名单，优先检查白名单
-	if len(ch.config.BotAdmins) > 0 {
-		for _, adminID := range ch.config.BotAdmins {
+	// 如果全局配置指定了专属管理员名单，优先检查白名单
+	if len(ch.appConfig.Global.BotAdmins) > 0 {
+		for _, adminID := range ch.appConfig.Global.BotAdmins {
 			if msg.From.ID == adminID {
 				return true
 			}
@@ -873,21 +988,23 @@ func (ch *ChatHandler) isAdmin(msg *tgbotapi.Message) bool {
 	return member.Status == "administrator" || member.Status == "creator"
 }
 
-// isAuthorizedUser 检查用户是否在白名单中（Bot管理员或配置的专属AI角色）
+// isAuthorizedUser 检查用户是否在白名单中（Bot 管理员或配置的专属 AI 角色）
 func (ch *ChatHandler) isAuthorizedUser(userID int64) bool {
-	// 检查是否在 BotAdmins 名单中
-	if len(ch.config.BotAdmins) > 0 {
-		for _, adminID := range ch.config.BotAdmins {
+	// 检查是否在全局 BotAdmins 名单中
+	if len(ch.appConfig.Global.BotAdmins) > 0 {
+		for _, adminID := range ch.appConfig.Global.BotAdmins {
 			if userID == adminID {
 				return true
 			}
 		}
 	}
 
-	// 检查是否在预设身份 (AI_Roles) 中，比如皇帝/皇后
-	if ch.config.AIRoles != nil {
-		if _, exists := ch.config.AIRoles[userID]; exists {
-			return true
+	// 遍历所有群组的 AIRoles，检查用户是否在任一群组中有角色
+	for _, g := range ch.appConfig.Groups {
+		if g.AIRoles != nil {
+			if _, exists := g.AIRoles[userID]; exists {
+				return true
+			}
 		}
 	}
 

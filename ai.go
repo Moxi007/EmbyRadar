@@ -41,11 +41,11 @@ type ToolFunction struct {
 
 // ChatMessage 表示一条对话消息（OpenAI 格式）
 type ChatMessage struct {
-	Role       string     `json:"role"`                  // "system" | "user" | "assistant" | "tool"
-	Content    string     `json:"content"`               // 消息内容
-	Name       string     `json:"name,omitempty"`        // 当 role 为 tool 时，传入 function name
+	Role       string     `json:"role"`                   // "system" | "user" | "assistant" | "tool"
+	Content    string     `json:"content"`                // 消息内容
+	Name       string     `json:"name,omitempty"`         // 当 role 为 tool 时，传入 function name
 	ToolCallID string     `json:"tool_call_id,omitempty"` // 当 role 为 tool 时，传入 tool_call_id
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`  // 当 role 为 assistant 时，如果调用了工具则有此字段
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // 当 role 为 assistant 时，如果调用了工具则有此字段
 }
 
 // ChatCompletionRequest 表示 OpenAI Chat Completion 请求体
@@ -68,7 +68,6 @@ type ChatCompletionResponse struct {
 	} `json:"error,omitempty"`
 }
 
-
 // AIClient 封装了 OpenAI 兼容 API 的客户端
 type AIClient struct {
 	BaseURL     string
@@ -79,14 +78,14 @@ type AIClient struct {
 	HTTPClient  *http.Client
 }
 
-// NewAIClient 创建一个新的 AI 客户端实例
-func NewAIClient(config *Config) *AIClient {
+// NewAIClient 根据全局配置创建 AI 客户端实例，所有群组共享同一个
+func NewAIClient(global *GlobalConfig) *AIClient {
 	return &AIClient{
-		BaseURL:     config.AIBaseURL,
-		APIKey:      config.AIAPIKey,
-		Model:       config.AIModel,
-		MaxTokens:   config.AIMaxTokens,
-		Temperature: config.AITemperature,
+		BaseURL:     global.AIBaseURL,
+		APIKey:      global.AIAPIKey,
+		Model:       global.AIModel,
+		MaxTokens:   global.AIMaxTokens,
+		Temperature: global.AITemperature,
 		HTTPClient: &http.Client{
 			Timeout: 60 * time.Second, // AI 响应可能较慢，设置 60 秒超时
 		},
@@ -136,7 +135,7 @@ func (ac *AIClient) ChatCompletion(messages []ChatMessage, tools []Tool) (*ChatM
 
 		respBytes, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		
+
 		if err != nil {
 			lastErr = fmt.Errorf("读取 AI 响应失败: %w", err)
 			continue
@@ -148,7 +147,7 @@ func (ac *AIClient) ChatCompletion(messages []ChatMessage, tools []Tool) (*ChatM
 				lastErr = fmt.Errorf("AI API 返回临时错误 (HTTP %d): %s", resp.StatusCode, string(respBytes))
 				continue
 			}
-			
+
 			// 其他错误 (如 400, 401, 404) 直接报错，不需要重试
 			log.Printf("[AI] API 返回非重试类状态码: %d, 响应: %s", resp.StatusCode, string(respBytes))
 			return nil, fmt.Errorf("AI API 返回错误 (HTTP %d): %s", resp.StatusCode, string(respBytes))

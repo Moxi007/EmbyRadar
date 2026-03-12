@@ -6,123 +6,208 @@ import (
 	"os"
 )
 
-// Config 存储应用的所有配置
-type Config struct {
-	TelegramBotToken string `json:"telegram_bot_token"`
-	TelegramChatID   int64  `json:"telegram_chat_id"`
-	EmbyURL          string `json:"emby_url"`
-	EmbyAPIKey       string `json:"emby_api_key"`
-	UpdateInterval   int    `json:"update_interval"` // 以秒为单位
-	ServerName       string `json:"server_name"`     // 自定义服务名称，显示在状态面板
-
-	// AI 聊天相关配置
-	AIEnabled            bool             `json:"ai_enabled"`             // 是否启用 AI 聊天
-	AISearchEnabled      bool             `json:"ai_search_enabled"`      // 是否启用连网搜索功能
-	AIBaseURL            string           `json:"ai_base_url"`            // OpenAI 兼容 API 地址
-	AIAPIKey             string           `json:"ai_api_key"`             // AI API Key
-	AIModel              string           `json:"ai_model"`               // 模型名称
-	AISystemPrompt       string           `json:"ai_system_prompt"`       // 预设人设提示词
-	AIMaxContext         int              `json:"ai_max_context"`         // 最大上下文轮数
-	AIMaxTokens          int              `json:"ai_max_tokens"`          // 最大回复 token 数
-	AITemperature        float64          `json:"ai_temperature"`         // 温度参数
-	AIKnowledgeDir       string           `json:"ai_knowledge_dir"`       // 知识库目录
-	AIEmbyStatsFormat    string           `json:"ai_emby_stats_format"`   // Emby 实时数据注入格式
-	EmbyBossAPIUrl       string           `json:"embyboss_api_url"`       // EmbyBoss 本地服务地址 API
-	EmbyBossAPIToken     string           `json:"embyboss_api_token"`     // EmbyBoss 的 bot_token（用于接口鉴权）
-	EmbyBossCurrencyName string           `json:"embyboss_currency_name"` // 积分/货币名称，API 获取失败时的默认值
-	WebhookPort          int              `json:"webhook_port"`           // Webhook 监听端口，供 EmbyBoss 推送事件使用
-	WelcomeStickerID     string           `json:"welcome_sticker_id"`     // 新用户加群时发送的欢迎贴纸ID
-	WelcomeEmbyPrompt    string           `json:"welcome_emby_prompt"`    // 发放 Emby 账号时的提示词
-	WelcomeCodePrompt    string           `json:"welcome_code_prompt"`    // 仅兑换注册码时的提示词
-	AITriggerKeywords    []string         `json:"ai_trigger_keywords"`    // 触发关键词列表
-	AIRoles              map[int64]string `json:"ai_roles"`               // TG ID (string) 到 身份标识 (string) 的映射
-	BotAdmins            []int64          `json:"bot_admins"`             // 指定拥有机器人命令管控权的 TG ID
+// AppConfig 应用顶层配置，包含全局配置和群组配置列表
+type AppConfig struct {
+	Global GlobalConfig   `json:"global"`
+	Groups []*GroupConfig `json:"groups"`
+	// 运行时构建的路由 map，按 chat_id 索引群组配置，不序列化
+	groupMap map[int64]*GroupConfig
 }
 
-// LoadConfig 从 config.json 加载配置
-func LoadConfig(filename string) (*Config, error) {
-	file, err := os.Open(filename)
+// GlobalConfig 全局共享配置，所有群组复用
+type GlobalConfig struct {
+	TelegramBotToken string  `json:"telegram_bot_token"`
+	AIBaseURL        string  `json:"ai_base_url"`
+	AIAPIKey         string  `json:"ai_api_key"`
+	AIModel          string  `json:"ai_model"`
+	AIMaxTokens      int     `json:"ai_max_tokens"`
+	AITemperature    float64 `json:"ai_temperature"`
+	AIMaxContext     int     `json:"ai_max_context"`
+	BotAdmins        []int64 `json:"bot_admins"`
+}
+
+// GroupConfig 群组级独立配置，每个 Telegram 群组一份
+type GroupConfig struct {
+	TelegramChatID          int64            `json:"telegram_chat_id"`
+	EmbyURL                 string           `json:"emby_url"`
+	EmbyAPIKey              string           `json:"emby_api_key"`
+	EmbyBossAPIUrl          string           `json:"embyboss_api_url"`
+	EmbyBossAPIToken        string           `json:"embyboss_api_token"`
+	EmbyBossCurrencyName    string           `json:"embyboss_currency_name"`
+	ServerName              string           `json:"server_name"`
+	UpdateInterval          int              `json:"update_interval"`
+	WebhookPort             int              `json:"webhook_port"`
+	WelcomeStickerID        string           `json:"welcome_sticker_id"`
+	WelcomeEmbyPrompt       string           `json:"welcome_emby_prompt"`
+	WelcomeCodePrompt       string           `json:"welcome_code_prompt"`
+	AIEnabled               bool             `json:"ai_enabled"`
+	AISearchEnabled         bool             `json:"ai_search_enabled"`
+	AISystemPrompt          string           `json:"ai_system_prompt"`
+	AITriggerKeywords       []string         `json:"ai_trigger_keywords"`
+	AIRoles                 map[int64]string `json:"ai_roles"`
+	AIKnowledgeDir          string           `json:"ai_knowledge_dir"`
+	AIEmbyStatsFormat       string           `json:"ai_emby_stats_format"`
+	AIGoogleSearchGrounding bool             `json:"ai_google_search_grounding"`
+}
+
+// GetGroupConfig 根据 chatID 查找群组配置，O(1) map 查找
+// 若 chatID 未匹配到任何群组配置，返回 nil
+func (ac *AppConfig) GetGroupConfig(chatID int64) *GroupConfig {
+	if ac.groupMap == nil {
+		return nil
+	}
+	return ac.groupMap[chatID]
+}
+
+// IsAuthorizedGroup 检查 chatID 是否为已配置的授权群组
+func (ac *AppConfig) IsAuthorizedGroup(chatID int64) bool {
+	return ac.GetGroupConfig(chatID) != nil
+}
+
+// LoadConfig 加载并解析新格式的多群组配置文件
+// 若文件不存在则生成包含 groups 数组示例的默认模板并返回错误
+func LoadConfig(filename string) (*AppConfig, error) {
+	// 中间结构体，用于解析顶层全局字段和 groups 原始 JSON
+	type rawConfig struct {
+		TelegramBotToken string          `json:"telegram_bot_token"`
+		AIBaseURL        string          `json:"ai_base_url"`
+		AIAPIKey         string          `json:"ai_api_key"`
+		AIModel          string          `json:"ai_model"`
+		AIMaxTokens      int             `json:"ai_max_tokens"`
+		AITemperature    float64         `json:"ai_temperature"`
+		AIMaxContext     int             `json:"ai_max_context"`
+		BotAdmins        []int64         `json:"bot_admins"`
+		Groups           json.RawMessage `json:"groups"`
+	}
+
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 如果不存在，创建一个默认模板文件以便用户填写
-			defaultConfig := Config{
-				TelegramBotToken: "YOUR_TELEGRAM_BOT_TOKEN_HERE",
-				TelegramChatID:   -1000000000000,
-				EmbyURL:          "http://127.0.0.1:8096",
-				EmbyAPIKey:       "YOUR_EMBY_API_KEY_HERE",
-				UpdateInterval:   60,
-
-				AIEnabled:         false,
-				AISearchEnabled:   true,
-				AIBaseURL:         "https://api.openai.com/v1",
-				AIAPIKey:          "YOUR_AI_API_KEY_HERE",
-				AIModel:           "gpt-4o",
-				AISystemPrompt:    "你是一个友好的群聊助手，请保持回复简洁有趣。",
-				AIMaxContext:      20,
-				AIMaxTokens:       1000,
-				AITemperature:     0.7,
-				AIKnowledgeDir:    "config/knowledge",
-				AIEmbyStatsFormat: "\n\n【实时客观数据（仅作参考）】：当前你管理的【小鸡服】共有注册大臣/平民 %d 人，此时此刻服务器内正有 %d 人在流连佳作。",
-				EmbyBossAPIUrl:    "http://127.0.0.1:8838",
-				WebhookPort:       8889,
-				WelcomeEmbyPrompt: "这是系统通知：新平民 %s 刚刚成功开通了【小鸡服】的专属账号「%s」！\n\n【你的任务】：你现在必须在群里公开欢迎这位新平民。请直接对他说话，用你【大内主管】的专属语气（傲娇、有架子但也表示欢迎）发表一段欢迎词。\n【严禁】：不得带有任何对系统指令回复的动作（如“奴才遵旨”、“这就去办”等），也不要对这条通知本身做任何评价，必须且只能输出你对新平民说的欢迎语本身！切记！",
-				WelcomeCodePrompt: "这是系统通知：新平民 %s 刚刚成功使用了注册码，获得了【小鸡服】的入驻资格！\n\n【你的任务】：你现在必须在群里公开欢迎这位新平民。请直接对他说话，用你【大内主管】的专属语气（傲娇、有架子但也表示欢迎）发表一段欢迎词。\n【严禁】：不得带有任何对系统指令回复的动作（如“奴才遵旨”、“这就去办”等），也不要对这条通知本身做任何评价，必须且只能输出你对新平民说的欢迎语本身！切记！",
-				AITriggerKeywords: make([]string, 0),
-				AIRoles:           make(map[int64]string),
-				BotAdmins:         make([]int64, 0),
+			// 生成新格式的默认模板，包含 groups 数组示例
+			defaultTemplate := map[string]interface{}{
+				"telegram_bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
+				"ai_base_url":        "https://api.openai.com/v1",
+				"ai_api_key":         "YOUR_AI_API_KEY_HERE",
+				"ai_model":           "gpt-4o",
+				"ai_max_tokens":      1000,
+				"ai_temperature":     0.7,
+				"ai_max_context":     20,
+				"bot_admins":         []int64{},
+				"groups": []map[string]interface{}{
+					{
+						"telegram_chat_id":    -1000000000000,
+						"emby_url":            "http://127.0.0.1:8096",
+						"emby_api_key":        "YOUR_EMBY_API_KEY_HERE",
+						"embyboss_api_url":    "http://127.0.0.1:8838",
+						"embyboss_api_token":  "",
+						"server_name":         "EMBY",
+						"update_interval":     60,
+						"webhook_port":        0,
+						"ai_enabled":          false,
+						"ai_trigger_keywords": []string{},
+						"ai_roles":            map[string]string{},
+					},
+				},
 			}
-			bytes, _ := json.MarshalIndent(defaultConfig, "", "  ")
+			bytes, _ := json.MarshalIndent(defaultTemplate, "", "  ")
 			os.WriteFile(filename, bytes, 0644)
-			return nil, fmt.Errorf("配置文件 %s 不存在，已生成模板，请填写后重新运行", filename)
+			return nil, fmt.Errorf("配置文件 %s 不存在，已生成新格式模板（含 groups 数组），请填写后重新运行", filename)
 		}
 		return nil, err
 	}
-	defer file.Close()
 
-	var config Config
-	if err := json.NewDecoder(file).Decode(&config); err != nil {
+	// 解析为中间结构体
+	var raw rawConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %v", err)
 	}
 
-	// 简单校验
-	if config.TelegramBotToken == "" || config.TelegramBotToken == "YOUR_TELEGRAM_BOT_TOKEN_HERE" {
+	// 校验 telegram_bot_token 不为空且不为占位符
+	if raw.TelegramBotToken == "" || raw.TelegramBotToken == "YOUR_TELEGRAM_BOT_TOKEN_HERE" {
 		return nil, fmt.Errorf("请在 %s 中配置正确的 Telegram Bot Token", filename)
 	}
-	if config.EmbyAPIKey == "" || config.EmbyAPIKey == "YOUR_EMBY_API_KEY_HERE" {
-		return nil, fmt.Errorf("请在 %s 中配置正确的 Emby API Key", filename)
+
+	// 检查 groups 字段是否存在
+	if len(raw.Groups) == 0 {
+		return nil, fmt.Errorf("配置文件缺少 groups 字段，请使用新的 groups 数组格式进行配置")
 	}
 
-	// AI 相关默认值
-	if config.AIMaxContext <= 0 {
-		config.AIMaxContext = 20
-	}
-	if config.AIMaxTokens <= 0 {
-		config.AIMaxTokens = 1000
-	}
-	if config.AITemperature <= 0 {
-		config.AITemperature = 0.7
-	}
-	if config.AIKnowledgeDir == "" {
-		config.AIKnowledgeDir = "config/knowledge"
-	}
-	if config.AIEmbyStatsFormat == "" {
-		config.AIEmbyStatsFormat = "\n\n【实时客观数据（仅作参考）】：当前你管理的【小鸡服】共有注册大臣/平民 %d 人，此时此刻服务器内正有 %d 人在流连佳作。"
-	}
-	if config.EmbyBossAPIUrl == "" {
-		config.EmbyBossAPIUrl = "http://127.0.0.1:8838"
-	}
-	if config.EmbyBossCurrencyName == "" {
-		config.EmbyBossCurrencyName = "鸡蛋"
-	}
-	if config.WebhookPort == 0 {
-		config.WebhookPort = 8889
-	}
-	if config.WelcomeEmbyPrompt == "" {
-		config.WelcomeEmbyPrompt = "这是系统通知：新平民 %s 刚刚成功开通了【小鸡服】的专属账号「%s」！\n\n【你的任务】：你现在必须在群里公开欢迎这位新平民。请直接对他说话，用你【大内主管】的专属语气（傲娇、有架子但也表示欢迎）发表一段欢迎词。\n【严禁】：不得带有任何对系统指令回复的动作（如“奴才遵旨”、“这就去办”等），也不要对这条通知本身做任何评价，必须且只能输出你对新平民说的欢迎语本身！切记！"
-	}
-	if config.WelcomeCodePrompt == "" {
-		config.WelcomeCodePrompt = "这是系统通知：新平民 %s 刚刚成功使用了注册码，获得了【小鸡服】的入驻资格！\n\n【你的任务】：你现在必须在群里公开欢迎这位新平民。请直接对他说话，用你【大内主管】的专属语气（傲娇、有架子但也表示欢迎）发表一段欢迎词。\n【严禁】：不得带有任何对系统指令回复的动作（如“奴才遵旨”、“这就去办”等），也不要对这条通知本身做任何评价，必须且只能输出你对新平民说的欢迎语本身！切记！"
+	// 解析 groups 数组
+	var groups []*GroupConfig
+	if err := json.Unmarshal(raw.Groups, &groups); err != nil {
+		return nil, fmt.Errorf("解析 groups 数组失败: %v", err)
 	}
 
-	return &config, nil
+	// groups 数组为空时返回错误
+	if len(groups) == 0 {
+		return nil, fmt.Errorf("groups 数组为空，至少需要配置一个群组")
+	}
+
+	// 逐个校验 GroupConfig 并填充默认值
+	portMap := make(map[int]int) // webhook_port → 首次出现的群组索引
+	for i, g := range groups {
+		// 校验 telegram_chat_id 不为零值
+		if g.TelegramChatID == 0 {
+			return nil, fmt.Errorf("groups[%d] 缺少 telegram_chat_id 字段", i)
+		}
+
+		// 检测 webhook_port 冲突（仅非零端口）
+		if g.WebhookPort != 0 {
+			if prevIdx, exists := portMap[g.WebhookPort]; exists {
+				return nil, fmt.Errorf("webhook_port %d 冲突：groups[%d] 与 groups[%d] 使用了相同的端口", g.WebhookPort, prevIdx, i)
+			}
+			portMap[g.WebhookPort] = i
+		}
+
+		// 填充群组级默认值
+		if g.AIKnowledgeDir == "" {
+			g.AIKnowledgeDir = "config/knowledge"
+		}
+		if g.AISystemPrompt == "" {
+			g.AISystemPrompt = "你是一个群聊助手，请保持回复简洁友好。"
+		}
+		if g.UpdateInterval <= 0 {
+			g.UpdateInterval = 60
+		}
+		if g.EmbyBossAPIUrl == "" {
+			g.EmbyBossAPIUrl = "http://127.0.0.1:8838"
+		}
+		if g.EmbyBossCurrencyName == "" {
+			g.EmbyBossCurrencyName = "鸡蛋"
+		}
+	}
+
+	// 填充全局默认值
+	if raw.AIMaxTokens <= 0 {
+		raw.AIMaxTokens = 1000
+	}
+	if raw.AITemperature <= 0 {
+		raw.AITemperature = 0.7
+	}
+	if raw.AIMaxContext <= 0 {
+		raw.AIMaxContext = 20
+	}
+
+	// 构建 AppConfig
+	appConfig := &AppConfig{
+		Global: GlobalConfig{
+			TelegramBotToken: raw.TelegramBotToken,
+			AIBaseURL:        raw.AIBaseURL,
+			AIAPIKey:         raw.AIAPIKey,
+			AIModel:          raw.AIModel,
+			AIMaxTokens:      raw.AIMaxTokens,
+			AITemperature:    raw.AITemperature,
+			AIMaxContext:     raw.AIMaxContext,
+			BotAdmins:        raw.BotAdmins,
+		},
+		Groups: groups,
+	}
+
+	// 构建 groupMap 用于 O(1) 路由查找
+	appConfig.groupMap = make(map[int64]*GroupConfig, len(groups))
+	for _, g := range groups {
+		appConfig.groupMap[g.TelegramChatID] = g
+	}
+
+	return appConfig, nil
 }

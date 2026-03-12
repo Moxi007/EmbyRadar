@@ -139,6 +139,82 @@ func (kb *KnowledgeBase) AddEntry(name, content string) error {
 	return kb.Reload()
 }
 
+// MergeEntry 智能合并知识库条目
+// 若文件已存在，将新内容与旧内容通过 AI 进行语义合并和去重
+// 若文件不存在，创建新文件
+// 返回 (isNew bool, err error)
+func (kb *KnowledgeBase) MergeEntry(name, newContent string, aiClient *AIClient) (bool, error) {
+	// 防御性检查，防止路径穿越
+	name = filepath.Base(name)
+	if name == "" || name == "." || name == "/" {
+		return false, fmt.Errorf("无效的条目名称")
+	}
+
+	// 强制添加 .md 后缀
+	if !strings.HasSuffix(strings.ToLower(name), ".md") && !strings.HasSuffix(strings.ToLower(name), ".txt") {
+		name += ".md"
+	}
+
+	filePath := filepath.Join(kb.dir, name)
+
+	// 检查文件是否已存在
+	existingData, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 文件不存在，创建新文件
+			if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
+				return false, fmt.Errorf("写入知识库文件失败: %w", err)
+			}
+			kb.Reload()
+			return true, nil
+		}
+		return false, fmt.Errorf("读取知识库文件失败: %w", err)
+	}
+
+	// 文件已存在，尝试 AI 合并
+	oldContent := string(existingData)
+	mergedContent, err := mergeWithAI(aiClient, oldContent, newContent)
+	if err != nil {
+		// AI 合并失败，回退到简单文本追加
+		log.Printf("[知识库] AI 合并失败，回退到文本追加: %v", err)
+		mergedContent = oldContent + "\n\n---\n\n" + newContent
+	}
+
+	if err := os.WriteFile(filePath, []byte(mergedContent), 0644); err != nil {
+		return false, fmt.Errorf("写入合并后内容失败: %w", err)
+	}
+	kb.Reload()
+	return false, nil
+}
+
+// mergeWithAI 使用 AI 对新旧内容进行语义合并和去重
+func mergeWithAI(aiClient *AIClient, oldContent, newContent string) (string, error) {
+	if aiClient == nil {
+		return "", fmt.Errorf("AI 客户端未初始化")
+	}
+
+	prompt := fmt.Sprintf("你是一个知识库合并助手。请将以下【已有内容】和【新增内容】进行智能合并：\n"+
+		"1. 去除完全重复的语句\n"+
+		"2. 如果新旧内容描述同一属性但值不同（语义冲突），以【新增内容】为准\n"+
+		"3. 保持内容结构清晰，使用条理化格式\n"+
+		"4. 直接输出合并后的完整内容，不要包含任何前言或解释\n\n"+
+		"【已有内容】：\n%s\n\n【新增内容】：\n%s", oldContent, newContent)
+
+	msg, err := aiClient.ChatCompletion([]ChatMessage{
+		{Role: "system", Content: "你是一个专业的知识库合并引擎，负责将新旧内容智能合并。"},
+		{Role: "user", Content: prompt},
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+
+	result := strings.TrimSpace(msg.Content)
+	if result == "" {
+		return "", fmt.Errorf("AI 返回空内容")
+	}
+	return result, nil
+}
+
 // DeleteEntry 删除一个知识库条目
 func (kb *KnowledgeBase) DeleteEntry(name string) error {
 	name = filepath.Base(name)
