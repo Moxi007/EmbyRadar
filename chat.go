@@ -608,17 +608,11 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	if ch.config.AISearchEnabled {
 		modelName := strings.ToLower(ch.config.AIModel)
 		if strings.Contains(modelName, "gemini") {
-			// 如果是 Gemini 系列模型，在开启联网时优先尝试注入其原生的 Google Search Grounding 参数
-			// 同时下发 google_search_retrieval (AI Studio) 和 google_search (Vertex AI) 以提升通过率
+			// 如果是 Gemini 系列模型，注入原生 Google Search Grounding 参数
+			// 使用 Vertex AI 兼容的 google_search 格式
 			tools = append(tools, Tool{
-				Type: "google_search", 
-				GoogleSearchRetrieval: map[string]any{
-					"dynamicRetrievalConfig": map[string]any{
-						"mode": "MODE_DYNAMIC",
-						"dynamicThreshold": 0.3, 
-					},
-				},
-				GoogleSearch: map[string]any{}, // 兼容 Vertex 的格式
+				Type:         "google_search",
+				GoogleSearch: map[string]any{},
 			})
 			log.Printf("[AI] 检测到 Gemini 模型，注入原生 Google Search Grounding 参数...")
 		} else {
