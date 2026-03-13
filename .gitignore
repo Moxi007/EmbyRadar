@@ -19,6 +19,7 @@ go.work
 go.work.sum
 
 # Local configurations and cache files
+config/config.json
 config.json
 message_id.json
 embyradar

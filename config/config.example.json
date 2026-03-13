@@ -1,0 +1,36 @@
+{
+  "telegram_bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+  "ai_base_url": "http://127.0.0.1:8317/v1",
+  "ai_api_key": "YOUR_AI_API_KEY",
+  "ai_model": "gemini-3-flash-preview",
+  "ai_max_tokens": 2000,
+  "ai_temperature": 0.8,
+  "ai_max_context": 20,
+  "bot_admins": [123456789],
+  "groups": [
+    {
+      "telegram_chat_id": -100123456789,
+      "emby_url": "http://127.0.0.1:8096",
+      "emby_api_key": "YOUR_EMBY_API_KEY",
+      "embyboss_api_url": "http://127.0.0.1:7738",
+      "embyboss_api_token": "YOUR_EMBYBOSS_API_TOKEN",
+      "embyboss_currency_name": "",
+      "server_name": "我的服务器",
+      "update_interval": 60,
+      "webhook_port": 8889,
+      "welcome_sticker_id": "",
+      "welcome_emby_prompt": "这是系统通知：新用户 %s 刚刚开通了账号「%s」！请欢迎他。",
+      "welcome_code_prompt": "这是系统通知：新用户 %s 刚刚使用注册码获得了入驻资格！请欢迎他。",
+      "ai_enabled": true,
+      "ai_search_enabled": true,
+      "ai_google_search_grounding": false,
+      "ai_system_prompt": "你是一个群聊助手，请保持回复简洁友好。",
+      "ai_trigger_keywords": ["助手", "机器人"],
+      "ai_roles": {
+        "123456789": "管理员"
+      },
+      "ai_knowledge_dir": "config/knowledge",
+      "ai_emby_stats_format": ""
+    }
+  ]
+}
