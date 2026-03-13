@@ -78,16 +78,8 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 	return ch
 }
 
-// getCurrencyName 动态获取货币名称，优先从 EmbyBoss API 获取，
-// 失败时回退到本地配置值，确保前后端货币名称一致
+// getCurrencyName 获取群组配置的货币名称
 func (ch *ChatHandler) getCurrencyName(chatID int64) string {
-	if eb := ch.ebMap[chatID]; eb != nil {
-		if name, err := eb.GetCurrencyName(); err == nil {
-			return name
-		}
-		log.Printf("[ChatHandler] 从 EmbyBoss API 获取货币名称失败，回退到本地配置值")
-	}
-	// 回退到群组配置中的本地货币名称
 	if g := ch.appConfig.GetGroupConfig(chatID); g != nil {
 		return g.EmbyBossCurrencyName
 	}

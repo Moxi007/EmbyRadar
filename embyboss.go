@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"time"
 )
 
@@ -89,16 +89,26 @@ func (c *EmbyBossClient) GetUserInfo(tgID int64) (*UserInfoResponse, error) {
 }
 
 // DeductCoins 扣除指定用户的货币
-// 调用 EmbyBoss 的 /user/deduct 接口，参数通过 query string 传递
+// 调用 EmbyBoss 的 /user/update_credit 接口，传入负数 credit 实现扣除
 func (c *EmbyBossClient) DeductCoins(tgID int64, amount int, reason string) error {
-	reqURL := fmt.Sprintf("%s/user/deduct?tg=%d&amount=%d&reason=%s&token=%s",
-		c.BaseURL, tgID, amount, url.QueryEscape(reason), c.APIToken)
+	reqURL := fmt.Sprintf("%s/user/update_credit?token=%s", c.BaseURL, c.APIToken)
 	log.Printf("[EmbyBoss] 正在扣除货币: tg=%d, amount=%d, reason=%s", tgID, amount, reason)
 
-	req, err := http.NewRequest("POST", reqURL, nil)
+	// 构建 JSON 请求体，credit 为负数表示扣除
+	payload := map[string]interface{}{
+		"tg":     fmt.Sprintf("%d", tgID),
+		"credit": -amount,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("序列化扣币请求体失败: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(payloadBytes))
 	if err != nil {
 		return fmt.Errorf("创建扣币请求失败: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -133,16 +143,26 @@ func (c *EmbyBossClient) DeductCoins(tgID int64, amount int, reason string) erro
 }
 
 // RefundCoins 退还指定用户的货币
-// 调用 EmbyBoss 的 /user/refund 接口，参数通过 query string 传递
+// 调用 EmbyBoss 的 /user/update_credit 接口，传入正数 credit 实现退还
 func (c *EmbyBossClient) RefundCoins(tgID int64, amount int, reason string) error {
-	reqURL := fmt.Sprintf("%s/user/refund?tg=%d&amount=%d&reason=%s&token=%s",
-		c.BaseURL, tgID, amount, url.QueryEscape(reason), c.APIToken)
+	reqURL := fmt.Sprintf("%s/user/update_credit?token=%s", c.BaseURL, c.APIToken)
 	log.Printf("[EmbyBoss] 正在退还货币: tg=%d, amount=%d, reason=%s", tgID, amount, reason)
 
-	req, err := http.NewRequest("POST", reqURL, nil)
+	// 构建 JSON 请求体，credit 为正数表示退还
+	payload := map[string]interface{}{
+		"tg":     fmt.Sprintf("%d", tgID),
+		"credit": amount,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("序列化退币请求体失败: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(payloadBytes))
 	if err != nil {
 		return fmt.Errorf("创建退币请求失败: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -174,59 +194,6 @@ func (c *EmbyBossClient) RefundCoins(tgID int64, amount int, reason string) erro
 
 	log.Printf("[EmbyBoss] 成功退还货币: tg=%d, amount=%d", tgID, amount)
 	return nil
-}
-
-// ConfigResponse 对应 EmbyBoss /bot/config 接口的返回结构
-type ConfigResponse struct {
-	Code         int    `json:"code"`
-	Message      string `json:"message"`
-	CurrencyName string `json:"currency_name"` // 服务端配置的货币名称
-}
-
-// GetCurrencyName 从 EmbyBoss 服务端动态获取货币名称。
-// 调用 /bot/config 端点，解析返回的 currency_name 字段。
-// 请求失败或返回异常时返回 error，供调用方 fallback 到本地配置。
-func (c *EmbyBossClient) GetCurrencyName() (string, error) {
-	url := fmt.Sprintf("%s/bot/config?token=%s", c.BaseURL, c.APIToken)
-	log.Printf("[EmbyBoss] 正在请求货币名称配置: %s/bot/config?token=***", c.BaseURL)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("创建请求失败: %w", err)
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		log.Printf("[EmbyBoss] 获取货币名称失败（网络错误）: %v", err)
-		return "", fmt.Errorf("请求 EmbyBoss 配置接口失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("EmbyBoss 配置接口 HTTP 错误 (状态码 %d): %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("读取配置响应失败: %w", err)
-	}
-
-	var configResp ConfigResponse
-	if err := json.Unmarshal(bodyBytes, &configResp); err != nil {
-		return "", fmt.Errorf("解析配置响应失败: %w", err)
-	}
-
-	if configResp.Code != 200 {
-		return "", fmt.Errorf("EmbyBoss 配置接口返回错误: %s", configResp.Message)
-	}
-
-	if configResp.CurrencyName == "" {
-		return "", fmt.Errorf("EmbyBoss 配置接口返回的货币名称为空")
-	}
-
-	log.Printf("[EmbyBoss] 成功获取服务端货币名称: %s", configResp.CurrencyName)
-	return configResp.CurrencyName, nil
 }
 
 // FormatForAI 将用户数据格式化为适合 AI 理解的自然语言
