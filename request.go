@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -375,6 +376,7 @@ type aiIntentResult struct {
 	Type       string `json:"type"`        // "movie" 或 "tv"
 	Year       string `json:"year"`        // 年份（可能为空）
 	IsRemaster bool   `json:"is_remaster"` // 是否为洗版请求
+	Season     int    `json:"season"`      // 季数（0 表示未指定）
 }
 
 // HandleRequest 处理求片请求入口
@@ -391,7 +393,7 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 		return
 	}
 
-	// 第一步：调用 AI 分析用户输入，提取影视名称、类型、年份、洗版意图
+	// 第一步：调用 AI 分析用户输入，提取影视名称、类型、年份、洗版意图、季数
 	intentMessages := []ChatMessage{
 		{
 			Role: "system",
@@ -399,8 +401,9 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 				"1. name: 影视作品名称\n" +
 				"2. type: 类型，\"movie\"（电影）或 \"tv\"（电视剧），无法判断时留空\n" +
 				"3. year: 年份，无法判断时留空\n" +
-				"4. is_remaster: 是否有洗版意图（用户想要更高清版本），布尔值\n\n" +
-				"只返回 JSON，不要包含其他文字。示例：{\"name\":\"流浪地球2\",\"type\":\"movie\",\"year\":\"2023\",\"is_remaster\":false}"},
+				"4. is_remaster: 是否有洗版意图（用户想要更高清版本），布尔值\n" +
+				"5. season: 季数，整数，无法判断时为 0。如果用户输入中包含季数信息（如\"第X季\"、\"X季\"、\"Season X\"等），请将季数从 name 中分离出来\n\n" +
+				"只返回 JSON，不要包含其他文字。示例：{\"name\":\"流浪地球2\",\"type\":\"movie\",\"year\":\"2023\",\"is_remaster\":false,\"season\":0}"},
 		},
 		{
 			Role:    "user",
@@ -449,6 +452,13 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 		ch.bot.Send(reply)
 		return
 	}
+
+	// 正则兜底：从名称中剥离季数信息，确保纯剧名传给 TMDB 搜索
+	cleanName, regexSeason := stripSeasonFromName(intent.Name)
+	if intent.Season == 0 && regexSeason > 0 {
+		intent.Season = regexSeason
+	}
+	intent.Name = cleanName
 
 	results, err := tmdbClient.SearchMulti(intent.Name, intent.Type)
 	if err != nil {
@@ -790,8 +800,9 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 			Content: MessageContent{Text: "你是一个影视信息提取助手。请从用户的文本中提取以下信息并以 JSON 格式返回：\n" +
 				"1. name: 影视作品名称\n" +
 				"2. type: 类型，\"movie\"（电影）或 \"tv\"（电视剧），无法判断时留空\n" +
-				"3. is_remaster: 是否有洗版意图（用户想要更高清版本），布尔值\n\n" +
-				"只返回 JSON，不要包含其他文字。示例：{\"name\":\"流浪地球2\",\"type\":\"movie\",\"is_remaster\":false}"},
+				"3. is_remaster: 是否有洗版意图（用户想要更高清版本），布尔值\n" +
+				"4. season: 季数，整数，无法判断时为 0。如果用户输入中包含季数信息（如\"第X季\"、\"X季\"、\"Season X\"等），请将季数从 name 中分离出来\n\n" +
+				"只返回 JSON，不要包含其他文字。示例：{\"name\":\"流浪地球2\",\"type\":\"movie\",\"is_remaster\":false,\"season\":0}"},
 		},
 		{
 			Role:    "user",
@@ -821,6 +832,11 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 			isRemaster = intent.IsRemaster
 		}
 	}
+
+	// 正则兜底：从名称中剥离季数信息，确保纯剧名传给 TMDB 搜索
+	cleanName, regexSeason := stripSeasonFromName(movieName)
+	movieName = cleanName
+	_ = regexSeason // 季数信息在此入口暂不使用，但确保搜索关键词纯净
 
 	// 搜索 TMDB
 	results, err := tmdbClient.SearchMulti(movieName, mediaType)
@@ -1042,4 +1058,137 @@ func (rh *RequestHandler) deleteSession(chatID, userID int64) {
 	rh.mu.Lock()
 	defer rh.mu.Unlock()
 	delete(rh.sessions, sessionKey(chatID, userID))
+}
+
+// chineseDigits 中文基本数字到阿拉伯数字的映射
+var chineseDigits = map[rune]int{
+	'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+	'六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+}
+
+// chineseNumToInt 将中文数字字符串转换为阿拉伯数字。
+// 支持范围：一(1) ~ 九十九(99)，涵盖常见季数。
+// 转换规则：
+//   - 单字：一=1, 二=2, ..., 十=10
+//   - 十X：十一=11, 十二=12, ..., 十九=19
+//   - X十：二十=20, 三十=30, ..., 九十=90
+//   - X十Y：二十一=21, 三十五=35, ..., 九十九=99
+//
+// 无法识别时返回 0。
+func chineseNumToInt(s string) int {
+	runes := []rune(s)
+	if len(runes) == 0 {
+		return 0
+	}
+
+	// 单字情况
+	if len(runes) == 1 {
+		if v, ok := chineseDigits[runes[0]]; ok {
+			return v
+		}
+		return 0
+	}
+
+	// "十X" 格式：十一=11, 十二=12, ...
+	if runes[0] == '十' {
+		if len(runes) == 1 {
+			return 10
+		}
+		if v, ok := chineseDigits[runes[1]]; ok && v < 10 {
+			return 10 + v
+		}
+		return 0
+	}
+
+	// "X十" 或 "X十Y" 格式
+	tens, ok := chineseDigits[runes[0]]
+	if !ok || tens >= 10 {
+		return 0
+	}
+	if len(runes) < 2 || runes[1] != '十' {
+		return 0
+	}
+	result := tens * 10
+	if len(runes) == 2 {
+		// "X十" 格式：二十=20, 三十=30, ...
+		return result
+	}
+	if len(runes) == 3 {
+		// "X十Y" 格式：二十一=21, 三十五=35, ...
+		if v, ok := chineseDigits[runes[2]]; ok && v < 10 {
+			return result + v
+		}
+	}
+	return 0
+}
+
+// 预编译正则表达式，避免每次调用时重复编译
+var (
+	// 匹配"第X季"（X 为中文数字），如"第四季"、"第十一季"
+	reChineseDi = regexp.MustCompile(`\s*第([一二三四五六七八九十]+)季\s*$`)
+	// 匹配"第N季"（N 为阿拉伯数字），如"第8季"、"第12季"
+	reArabicDi = regexp.MustCompile(`\s*第(\d+)季\s*$`)
+	// 匹配"X季"（X 为中文数字，前面需有空格或位于开头后），如"十一季"
+	// 要求前面有空格，避免误匹配"四季酒店"等非季数语义
+	reChineseBare = regexp.MustCompile(`\s+([一二三四五六七八九十]+)季\s*$`)
+	// 匹配 "Season N"（英文格式），如"Season 3"、"Season 12"
+	reSeasonEn = regexp.MustCompile(`(?i)\s*Season\s+(\d+)\s*$`)
+	// 匹配 "S\d+"（缩写格式），如"S01"、"S3"
+	reSeasonS = regexp.MustCompile(`(?i)\s*S(\d+)\s*$`)
+)
+
+// stripSeasonFromName 从影视名称中剥离季数信息，返回纯剧名和季数。
+// 按优先级依次尝试以下格式：
+//  1. 第X季（中文数字）
+//  2. 第N季（阿拉伯数字）
+//  3. X季（中文数字，前面需有空格以避免误匹配）
+//  4. Season N（英文格式）
+//  5. S\d+（缩写格式）
+//
+// 返回值：
+//   - 第一个返回值：剥离季数后的纯剧名（去除尾部空格）
+//   - 第二个返回值：提取到的季数（int），未匹配时为 0
+func stripSeasonFromName(name string) (string, int) {
+	// 1. 匹配"第X季"（中文数字）
+	if m := reChineseDi.FindStringSubmatchIndex(name); m != nil {
+		chNum := name[m[2]:m[3]]
+		if season := chineseNumToInt(chNum); season > 0 {
+			return strings.TrimRight(name[:m[0]], " "), season
+		}
+	}
+
+	// 2. 匹配"第N季"（阿拉伯数字）
+	if m := reArabicDi.FindStringSubmatch(name); m != nil {
+		if season, err := strconv.Atoi(m[1]); err == nil && season > 0 {
+			loc := reArabicDi.FindStringIndex(name)
+			return strings.TrimRight(name[:loc[0]], " "), season
+		}
+	}
+
+	// 3. 匹配"X季"（中文数字，前面需有空格）
+	if m := reChineseBare.FindStringSubmatchIndex(name); m != nil {
+		chNum := name[m[2]:m[3]]
+		if season := chineseNumToInt(chNum); season > 0 {
+			return strings.TrimRight(name[:m[0]], " "), season
+		}
+	}
+
+	// 4. 匹配 "Season N"
+	if m := reSeasonEn.FindStringSubmatch(name); m != nil {
+		if season, err := strconv.Atoi(m[1]); err == nil && season > 0 {
+			loc := reSeasonEn.FindStringIndex(name)
+			return strings.TrimRight(name[:loc[0]], " "), season
+		}
+	}
+
+	// 5. 匹配 "S\d+"
+	if m := reSeasonS.FindStringSubmatch(name); m != nil {
+		if season, err := strconv.Atoi(m[1]); err == nil && season > 0 {
+			loc := reSeasonS.FindStringIndex(name)
+			return strings.TrimRight(name[:loc[0]], " "), season
+		}
+	}
+
+	// 未匹配任何季数格式，返回原名称
+	return name, 0
 }
