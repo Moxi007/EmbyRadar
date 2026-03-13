@@ -23,6 +23,7 @@ type RequestRecord struct {
 	Year        string     // 年份
 	IsRemaster  bool       // 是否洗版
 	Status      string     // pending/approved/rejected/fulfilled/expired
+	CoinCost    int        // 本次求片实际扣除的金币数，用于拒绝时退还
 	CreatedAt   time.Time  // 创建时间
 	ApprovedAt  *time.Time // 审批时间（可为空）
 	FulfilledAt *time.Time // 入库确认时间（可为空）
@@ -85,6 +86,9 @@ func NewRequestStore(dbPath string) (*RequestStore, error) {
 		return nil, fmt.Errorf("执行建表迁移失败: %w", err)
 	}
 
+	// 幂等迁移：为 requests 表添加 coin_cost 列（已存在则静默忽略）
+	db.Exec(`ALTER TABLE requests ADD COLUMN coin_cost INTEGER NOT NULL DEFAULT 0`)
+
 	return &RequestStore{db: db}, nil
 }
 
@@ -96,9 +100,9 @@ func (s *RequestStore) Close() error {
 // InsertRequest 插入一条新的求片记录，状态为 pending
 func (s *RequestStore) InsertRequest(r *RequestRecord) error {
 	result, err := s.db.Exec(
-		`INSERT INTO requests (chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
-		r.ChatID, r.UserID, r.UserName, r.TMDBID, r.Title, r.MediaType, r.Year, boolToInt(r.IsRemaster),
+		`INSERT INTO requests (chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, coin_cost)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+		r.ChatID, r.UserID, r.UserName, r.TMDBID, r.Title, r.MediaType, r.Year, boolToInt(r.IsRemaster), r.CoinCost,
 	)
 	if err != nil {
 		return fmt.Errorf("插入求片记录失败: %w", err)
@@ -157,7 +161,7 @@ func (s *RequestStore) HasActiveRequest(chatID, userID int64, tmdbID int) (bool,
 // ListApproved 查询所有状态为 approved 的记录
 func (s *RequestStore) ListApproved() ([]*RequestRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, created_at, approved_at, fulfilled_at
+		`SELECT id, chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
 		 FROM requests WHERE status = 'approved'`,
 	)
 	if err != nil {
@@ -171,7 +175,7 @@ func (s *RequestStore) ListApproved() ([]*RequestRecord, error) {
 // 用于管理员审批时从回调数据定位对应的求片记录
 func (s *RequestStore) FindPendingRequest(chatID, userID int64, tmdbID int) (*RequestRecord, error) {
 	row := s.db.QueryRow(
-		`SELECT id, chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, created_at, approved_at, fulfilled_at
+		`SELECT id, chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
 		 FROM requests WHERE chat_id = ? AND user_id = ? AND tmdb_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1`,
 		chatID, userID, tmdbID,
 	)
@@ -184,7 +188,7 @@ func (s *RequestStore) FindPendingRequest(chatID, userID int64, tmdbID int) (*Re
 	err := row.Scan(
 		&r.ID, &r.ChatID, &r.UserID, &r.UserName, &r.TMDBID,
 		&r.Title, &r.MediaType, &r.Year, &isRemaster, &r.Status,
-		&createdAt, &approvedAt, &fulfilledAt,
+		&r.CoinCost, &createdAt, &approvedAt, &fulfilledAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -214,7 +218,7 @@ func (s *RequestStore) FindPendingRequest(chatID, userID int64, tmdbID int) (*Re
 // ListExpiredApproved 查询超过指定天数仍为 approved 的记录
 func (s *RequestStore) ListExpiredApproved(days int) ([]*RequestRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, created_at, approved_at, fulfilled_at
+		`SELECT id, chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
 		 FROM requests WHERE status = 'approved' AND approved_at <= datetime('now', ?)`,
 		fmt.Sprintf("-%d days", days),
 	)
@@ -237,7 +241,7 @@ func scanRecords(rows *sql.Rows) ([]*RequestRecord, error) {
 		err := rows.Scan(
 			&r.ID, &r.ChatID, &r.UserID, &r.UserName, &r.TMDBID,
 			&r.Title, &r.MediaType, &r.Year, &isRemaster, &r.Status,
-			&createdAt, &approvedAt, &fulfilledAt,
+			&r.CoinCost, &createdAt, &approvedAt, &fulfilledAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("扫描记录失败: %w", err)

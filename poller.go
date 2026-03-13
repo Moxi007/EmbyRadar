@@ -106,7 +106,7 @@ func (p *Poller) checkAndNotify(record *RequestRecord) error {
 	}
 
 	// 资源已入库，发送通知消息到原群聊
-	notifyText := FormatFulfilledNotify(record.UserID, record.Title, record.TMDBID, record.MediaType)
+	notifyText := FormatFulfilledNotify(record.UserID, record.UserName, record.Title, record.TMDBID, record.MediaType)
 	notifyMsg := tgbotapi.NewMessage(record.ChatID, notifyText)
 	notifyMsg.ParseMode = "Markdown"
 	if _, err := p.bot.Send(notifyMsg); err != nil {
@@ -123,9 +123,12 @@ func (p *Poller) checkAndNotify(record *RequestRecord) error {
 	return nil
 }
 
-// FormatFulfilledNotify 生成入库通知消息，片名链接到 TMDB 页面
-func FormatFulfilledNotify(userID int64, title string, tmdbID int, mediaType string) string {
-	userLink := fmt.Sprintf("[用户](tg://user?id=%d)", userID)
+// FormatFulfilledNotify 生成入库通知消息，用户名和片名均为超链接
+func FormatFulfilledNotify(userID int64, userName string, title string, tmdbID int, mediaType string) string {
+	if userName == "" {
+		userName = "用户"
+	}
+	userLink := fmt.Sprintf("[%s](tg://user?id=%d)", cleanMarkdownName(userName), userID)
 	mediaPath := "movie"
 	if mediaType == "tv" {
 		mediaPath = "tv"

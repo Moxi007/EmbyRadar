@@ -87,6 +87,94 @@ func (c *EmbyBossClient) GetUserInfo(tgID int64) (*UserInfoResponse, error) {
 	return &userInfo, nil
 }
 
+// DeductCoins 扣除指定用户的金币
+// 调用 EmbyBoss 的 /user/deduct 接口，参数通过 query string 传递
+func (c *EmbyBossClient) DeductCoins(tgID int64, amount int, reason string) error {
+	url := fmt.Sprintf("%s/user/deduct?tg=%d&amount=%d&reason=%s&token=%s",
+		c.BaseURL, tgID, amount, reason, c.APIToken)
+	log.Printf("[EmbyBoss] 正在扣除金币: tg=%d, amount=%d, reason=%s", tgID, amount, reason)
+
+	req, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("创建扣币请求失败: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		log.Printf("[EmbyBoss] 扣币网络请求失败: %v", err)
+		return fmt.Errorf("请求 EmbyBoss 扣币接口失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("读取扣币响应失败: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("EmbyBoss 扣币接口 HTTP 错误 (状态码 %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		return fmt.Errorf("解析扣币响应失败: %w", err)
+	}
+
+	if result.Code != 200 {
+		return fmt.Errorf("EmbyBoss 扣币失败: %s", result.Message)
+	}
+
+	log.Printf("[EmbyBoss] 成功扣除金币: tg=%d, amount=%d", tgID, amount)
+	return nil
+}
+
+// RefundCoins 退还指定用户的金币
+// 调用 EmbyBoss 的 /user/refund 接口，参数通过 query string 传递
+func (c *EmbyBossClient) RefundCoins(tgID int64, amount int, reason string) error {
+	url := fmt.Sprintf("%s/user/refund?tg=%d&amount=%d&reason=%s&token=%s",
+		c.BaseURL, tgID, amount, reason, c.APIToken)
+	log.Printf("[EmbyBoss] 正在退还金币: tg=%d, amount=%d, reason=%s", tgID, amount, reason)
+
+	req, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("创建退币请求失败: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		log.Printf("[EmbyBoss] 退币网络请求失败: %v", err)
+		return fmt.Errorf("请求 EmbyBoss 退币接口失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("读取退币响应失败: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("EmbyBoss 退币接口 HTTP 错误 (状态码 %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		return fmt.Errorf("解析退币响应失败: %w", err)
+	}
+
+	if result.Code != 200 {
+		return fmt.Errorf("EmbyBoss 退币失败: %s", result.Message)
+	}
+
+	log.Printf("[EmbyBoss] 成功退还金币: tg=%d, amount=%d", tgID, amount)
+	return nil
+}
+
 // ConfigResponse 对应 EmbyBoss /bot/config 接口的返回结构
 type ConfigResponse struct {
 	Code         int    `json:"code"`

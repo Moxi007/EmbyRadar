@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -495,6 +496,45 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 			return true
 		}
 		go ch.requestHandler.HandleRequest(ch, msg, args)
+		return true
+
+	case "request_coin_cost":
+		// 查看或设置求片金币费用，仅群聊中有效
+		if msg.Chat.Type == "private" {
+			return true
+		}
+		group := ch.appConfig.GetGroupConfig(msg.Chat.ID)
+		if group == nil {
+			return true
+		}
+		args := strings.TrimSpace(msg.CommandArguments())
+		if args == "" {
+			// 无参数：所有人可查看当前金币费用
+			currencyName := ch.getCurrencyName(msg.Chat.ID)
+			ch.sendReply(msg, fmt.Sprintf("当前求片金币费用: %d %s", group.RequestCoinCost, currencyName))
+			return true
+		}
+		// 带参数：仅管理员可修改
+		if !ch.isAdmin(msg) {
+			return true
+		}
+		cost, err := strconv.Atoi(args)
+		if err != nil {
+			ch.sendReply(msg, "请输入有效的数字")
+			return true
+		}
+		if cost < 0 {
+			ch.sendReply(msg, "金币费用不能为负数")
+			return true
+		}
+		group.RequestCoinCost = cost
+		if err := ch.appConfig.SaveConfig("config/config.json"); err != nil {
+			log.Printf("[ChatHandler] 保存配置文件失败: %v", err)
+			ch.sendReply(msg, fmt.Sprintf("❌ 保存配置失败: %v", err))
+			return true
+		}
+		currencyName := ch.getCurrencyName(msg.Chat.ID)
+		ch.sendReply(msg, fmt.Sprintf("✅ 求片金币费用已设置为 %d %s", cost, currencyName))
 		return true
 	}
 

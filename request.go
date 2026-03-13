@@ -90,6 +90,47 @@ func (rh *RequestHandler) CleanExpired() {
 	}
 }
 
+// checkRequestAuth 检查用户是否有权发起求片请求
+// 返回值：(是否通过鉴权, 拒绝原因消息)
+// 当群组未配置 EmbyBoss 时跳过鉴权，直接返回通过
+func checkRequestAuth(ch *ChatHandler, chatID, userID int64) (bool, string) {
+	// 检查群组是否配置了 EmbyBoss 客户端
+	ebClient := ch.ebMap[chatID]
+	if ebClient == nil {
+		// 群组未配置 EmbyBoss，跳过鉴权
+		return true, ""
+	}
+
+	// 调用 EmbyBoss 查询用户信息
+	userInfo, err := ebClient.GetUserInfo(userID)
+	if err != nil {
+		// 区分网络错误和无用户数据：
+		// GetUserInfo 在 HTTP 请求失败时返回包含"请求 EmbyBoss 失败"的错误
+		// 在业务层 code != 200 时返回包含"EmbyBoss API 返回错误或无该用户数据"的错误
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "请求 EmbyBoss 失败") ||
+			strings.Contains(errMsg, "EmbyBoss HTTP 错误") ||
+			strings.Contains(errMsg, "创建请求失败") ||
+			strings.Contains(errMsg, "读取响应失败") ||
+			strings.Contains(errMsg, "解析 EmbyBoss 响应失败") {
+			log.Printf("[求片鉴权] EmbyBoss 服务请求失败: %v", err)
+			return false, "鉴权服务暂时不可用，请稍后再试"
+		}
+		// 业务层返回非 200，视为无用户数据
+		log.Printf("[求片鉴权] 用户 %d 无 Emby 账号: %v", userID, err)
+		return false, "你还没有 Emby 账号，无法发起求片请求"
+	}
+
+	// 检查用户账号是否被封禁
+	if userInfo.Data.Lv == "c" {
+		log.Printf("[求片鉴权] 用户 %d 账号已被封禁", userID)
+		return false, "你的 Emby 账号已被封禁，无法发起求片请求"
+	}
+
+	// 鉴权通过
+	return true, ""
+}
+
 // InventoryCheckResult 库存查重结果，用于决定求片请求是否继续流转
 type InventoryCheckResult struct {
 	Allowed           bool            // 是否允许继续
@@ -213,8 +254,8 @@ func ParseCallbackData(data string) (*CallbackData, error) {
 	}
 
 	action := parts[1]
-	if action != "approve" && action != "reject" {
-		return nil, fmt.Errorf("无效的操作类型：%s，仅支持 approve 或 reject", action)
+	if action != "approve" && action != "reject" && action != "reject_no_resource" {
+		return nil, fmt.Errorf("无效的操作类型：%s，仅支持 approve、reject 或 reject_no_resource", action)
 	}
 
 	chatID, err := strconv.ParseInt(parts[2], 10, 64)
@@ -311,11 +352,19 @@ func BuildApprovalKeyboard(session *RequestSession) tgbotapi.InlineKeyboardMarku
 		UserID: session.UserID,
 		TMDBID: session.TMDBResult.ID,
 	})
+	// "暂无资源"拒绝按钮，用于区分普通拒绝和资源不可用的情况
+	rejectNoResourceData := FormatCallbackData(&CallbackData{
+		Action: "reject_no_resource",
+		ChatID: session.ChatID,
+		UserID: session.UserID,
+		TMDBID: session.TMDBResult.ID,
+	})
 
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("✅ 通过", approveData),
 			tgbotapi.NewInlineKeyboardButtonData("❌ 拒绝", rejectData),
+			tgbotapi.NewInlineKeyboardButtonData("📭 暂无资源", rejectNoResourceData),
 		),
 	)
 }
@@ -333,6 +382,14 @@ type aiIntentResult struct {
 func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, text string) {
 	chatID := msg.Chat.ID
 	userID := msg.From.ID
+
+	// 鉴权检查：在 AI 意图分析之前验证用户是否有权发起求片
+	if passed, rejectMsg := checkRequestAuth(ch, chatID, userID); !passed {
+		reply := tgbotapi.NewMessage(chatID, rejectMsg)
+		reply.ReplyToMessageID = msg.MessageID
+		ch.bot.Send(reply)
+		return
+	}
 
 	// 第一步：调用 AI 分析用户输入，提取影视名称、类型、年份、洗版意图
 	intentMessages := []ChatMessage{
@@ -427,7 +484,7 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 		}
 		year := r.GetYear()
 		title := r.GetDisplayTitle()
-		sb.WriteString(fmt.Sprintf("%s %d. %s（%s）\n", mediaIcon, i+1, title, year))
+		sb.WriteString(fmt.Sprintf("%s %d. [%s（%s）](%s)\n", mediaIcon, i+1, cleanMarkdownName(title), year, r.GetTMDBURL()))
 
 		// 按钮文本：序号 + 标题 + 年份，回调数据编码索引
 		btnText := fmt.Sprintf("%d. %s（%s）", i+1, title, year)
@@ -447,6 +504,7 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	reply := tgbotapi.NewMessage(chatID, sb.String())
+	reply.ParseMode = "Markdown"
 	reply.ReplyToMessageID = msg.MessageID
 	reply.ReplyMarkup = keyboard
 	ch.bot.Send(reply)
@@ -546,6 +604,42 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		return
 	}
 
+	// 金币检查与扣除：当群组配置了金币费用且有 EmbyBoss 客户端时执行
+	coinCost := 0
+	group := ch.appConfig.GetGroupConfig(cbData.ChatID)
+	ebClient := ch.ebMap[cbData.ChatID]
+	if group != nil && group.RequestCoinCost > 0 && ebClient != nil {
+		// 查询用户金币余额
+		userInfo, err := ebClient.GetUserInfo(cbData.UserID)
+		if err != nil {
+			log.Printf("[求片] 金币余额查询失败 (user=%d): %v", cbData.UserID, err)
+			reply := tgbotapi.NewMessage(cbData.ChatID, "金币余额查询失败，请稍后再试")
+			ch.bot.Send(reply)
+			rh.deleteSession(cbData.ChatID, cbData.UserID)
+			return
+		}
+		balance := userInfo.Data.Iv
+		if balance < group.RequestCoinCost {
+			currencyName := ch.getCurrencyName(cbData.ChatID)
+			reply := tgbotapi.NewMessage(cbData.ChatID, fmt.Sprintf(
+				"金币不足，当前余额 %d %s，求片需要 %d %s",
+				balance, currencyName, group.RequestCoinCost, currencyName))
+			ch.bot.Send(reply)
+			rh.deleteSession(cbData.ChatID, cbData.UserID)
+			return
+		}
+		// 扣除金币
+		if err := ebClient.DeductCoins(cbData.UserID, group.RequestCoinCost, "求片扣费"); err != nil {
+			log.Printf("[求片] 金币扣除失败 (user=%d, cost=%d): %v", cbData.UserID, group.RequestCoinCost, err)
+			reply := tgbotapi.NewMessage(cbData.ChatID, "金币扣除失败，请稍后再试")
+			ch.bot.Send(reply)
+			rh.deleteSession(cbData.ChatID, cbData.UserID)
+			return
+		}
+		coinCost = group.RequestCoinCost
+		log.Printf("[求片] 金币扣除成功 (user=%d, cost=%d)", cbData.UserID, coinCost)
+	}
+
 	// 数据库去重和写入
 	var record *RequestRecord
 	if rh.store != nil {
@@ -573,6 +667,7 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 			MediaType:  selected.MediaType,
 			Year:       selected.GetYear(),
 			IsRemaster: session.IsRemaster,
+			CoinCost:   coinCost,
 		}
 		if err := rh.store.InsertRequest(record); err != nil {
 			log.Printf("[求片] 写入数据库失败: %v", err)
@@ -654,6 +749,15 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 	// 验证回调来源：只有发起者本人才能确认
 	if query.From.ID != userID {
 		callback := tgbotapi.NewCallback(query.ID, "只有发起者才能确认求片")
+		ch.bot.Request(callback)
+		return
+	}
+
+	// 鉴权检查：在回复 CallbackQuery 之前验证用户是否有权发起求片
+	if passed, rejectMsg := checkRequestAuth(ch, chatID, userID); !passed {
+		reply := tgbotapi.NewMessage(chatID, rejectMsg)
+		ch.bot.Send(reply)
+		callback := tgbotapi.NewCallback(query.ID, "鉴权未通过")
 		ch.bot.Request(callback)
 		return
 	}
@@ -749,7 +853,7 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 		}
 		year := r.GetYear()
 		title := r.GetDisplayTitle()
-		sb.WriteString(fmt.Sprintf("%s %d. %s（%s）\n", mediaIcon, i+1, title, year))
+		sb.WriteString(fmt.Sprintf("%s %d. [%s（%s）](%s)\n", mediaIcon, i+1, cleanMarkdownName(title), year, r.GetTMDBURL()))
 
 		btnText := fmt.Sprintf("%d. %s（%s）", i+1, title, year)
 		if len([]rune(btnText)) > 40 {
@@ -767,6 +871,7 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 
 	selectKeyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	selectMsg := tgbotapi.NewMessage(chatID, sb.String())
+	selectMsg.ParseMode = "Markdown"
 	selectMsg.ReplyMarkup = selectKeyboard
 	ch.bot.Send(selectMsg)
 
@@ -837,6 +942,9 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 	case "reject":
 		notifyText = fmt.Sprintf("%s 你的求片请求已被拒绝", userLink)
 		statusLabel = "🎬 求片请求（已拒绝 ❌）"
+	case "reject_no_resource":
+		notifyText = fmt.Sprintf("%s 你的求片请求被拒绝：该资源暂时没有资源，请耐心等待", userLink)
+		statusLabel = "🎬 求片请求（暂无资源 📭）"
 	}
 
 	// 在原求片群聊中发送通知消息
@@ -852,11 +960,23 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		switch cbData.Action {
 		case "approve":
 			dbStatus = "approved"
-		case "reject":
+		case "reject", "reject_no_resource":
 			dbStatus = "rejected"
 		}
 		if err := rh.store.UpdateStatus(dbRecord.ID, dbStatus); err != nil {
 			log.Printf("[求片] 更新数据库状态失败: %v", err)
+		}
+	}
+
+	// 拒绝时退还金币
+	if dbRecord != nil && dbRecord.CoinCost > 0 && (cbData.Action == "reject" || cbData.Action == "reject_no_resource") {
+		ebClient := ch.ebMap[cbData.ChatID]
+		if ebClient != nil {
+			if err := ebClient.RefundCoins(cbData.UserID, dbRecord.CoinCost, "求片被拒绝退还"); err != nil {
+				log.Printf("[求片] 金币退还失败 (userID=%d, requestID=%d, 应退金币=%d): %v", cbData.UserID, dbRecord.ID, dbRecord.CoinCost, err)
+			} else {
+				log.Printf("[求片] 金币退还成功 (userID=%d, amount=%d)", cbData.UserID, dbRecord.CoinCost)
+			}
 		}
 	}
 

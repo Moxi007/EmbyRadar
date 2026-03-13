@@ -49,7 +49,8 @@ type GroupConfig struct {
 	AIRoles              map[int64]string `json:"ai_roles"`
 	AIKnowledgeDir       string           `json:"ai_knowledge_dir"`
 	AIEmbyStatsFormat    string           `json:"ai_emby_stats_format"`
-	RequestEnabled       bool             `json:"request_enabled"` // 求片功能开关，默认 false
+	RequestEnabled       bool             `json:"request_enabled"`   // 求片功能开关，默认 false
+	RequestCoinCost      int              `json:"request_coin_cost"` // 每次求片消耗金币数，默认 0（不消耗）
 }
 
 // GetGroupConfig 根据 chatID 查找群组配置，O(1) map 查找
@@ -59,6 +60,33 @@ func (ac *AppConfig) GetGroupConfig(chatID int64) *GroupConfig {
 		return nil
 	}
 	return ac.groupMap[chatID]
+}
+
+// SaveConfig 将当前配置序列化为 JSON 并写入指定文件
+// 用于运行时通过 Bot 命令修改配置后的持久化
+func (ac *AppConfig) SaveConfig(filename string) error {
+	// 构建与配置文件一致的顶层结构
+	raw := map[string]interface{}{
+		"telegram_bot_token": ac.Global.TelegramBotToken,
+		"ai_base_url":        ac.Global.AIBaseURL,
+		"ai_api_key":         ac.Global.AIAPIKey,
+		"ai_model":           ac.Global.AIModel,
+		"ai_max_tokens":      ac.Global.AIMaxTokens,
+		"ai_temperature":     ac.Global.AITemperature,
+		"ai_max_context":     ac.Global.AIMaxContext,
+		"bot_admins":         ac.Global.BotAdmins,
+		"db_path":            ac.Global.DBPath,
+		"tmdb_api_key":       ac.Global.TMDBAPIKey,
+		"groups":             ac.Groups,
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化配置失败: %v", err)
+	}
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return fmt.Errorf("写入配置文件失败: %v", err)
+	}
+	return nil
 }
 
 // IsAuthorizedGroup 检查 chatID 是否为已配置的授权群组
@@ -110,6 +138,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 						"ai_enabled":          false,
 						"ai_trigger_keywords": []string{},
 						"ai_roles":            map[string]string{},
+						"request_coin_cost":   0,
 					},
 				},
 			}

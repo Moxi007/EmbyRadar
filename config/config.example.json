@@ -31,7 +31,8 @@
       },
       "ai_knowledge_dir": "config/knowledge",
       "ai_emby_stats_format": "",
-      "request_enabled": false
+      "request_enabled": false,
+      "request_coin_cost": 0
     }
   ]
 }
