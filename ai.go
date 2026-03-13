@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -236,4 +238,152 @@ func (ac *AIClient) ChatCompletion(messages []ChatMessage, tools []Tool) (*ChatM
 	}
 
 	return nil, fmt.Errorf("AI API 重试 %d 次后仍然失败, 最终错误: %w", maxRetries, lastErr)
+}
+
+// ImageGenerationRequest 图片生成请求体（OpenAI Images API 格式）
+type ImageGenerationRequest struct {
+	Model          string `json:"model"`
+	Prompt         string `json:"prompt"`
+	N              int    `json:"n"`
+	Size           string `json:"size"`
+	ResponseFormat string `json:"response_format,omitempty"`
+}
+
+// ImageGenerationResponse 图片生成响应体
+type ImageGenerationResponse struct {
+	Data  []ImageData `json:"data"`
+	Error *struct {
+		Message string `json:"message"`
+		Code    string `json:"code,omitempty"`
+	} `json:"error,omitempty"`
+}
+
+// ImageData 单张图片数据
+type ImageData struct {
+	B64JSON string `json:"b64_json,omitempty"`
+	URL     string `json:"url,omitempty"`
+}
+
+var (
+	// ErrContentPolicy 内容审核拒绝错误
+	ErrContentPolicy = errors.New("内容不符合安全策略")
+	// ErrRateLimitExhausted 速率限制重试耗尽
+	ErrRateLimitExhausted = errors.New("服务繁忙，请稍后重试")
+	// ErrImageDecode 图片数据解码失败
+	ErrImageDecode = errors.New("图片数据处理失败")
+)
+
+// GenerateImage 调用 Image API 生成图片，返回图片二进制数据。
+// 支持 b64_json 和 url 两种响应格式，对 429/503 进行最多 2 次指数退避重试。
+func (ac *AIClient) GenerateImage(prompt, model, size string) ([]byte, error) {
+	reqBody := ImageGenerationRequest{
+		Model:  model,
+		Prompt: prompt,
+		N:      1,
+		Size:   size,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("序列化图片生成请求失败: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/images/generations", ac.BaseURL)
+	maxRetries := 2
+	var lastErr error
+
+	// 使用独立的 120 秒超时客户端，图片生成耗时较长
+	imageClient := &http.Client{Timeout: 120 * time.Second}
+
+	for i := 0; i <= maxRetries; i++ {
+		if i > 0 {
+			delay := time.Duration(1<<uint(i-1)) * time.Second
+			log.Printf("[AI] 图片生成 API 繁忙(429/503)，等待 %v 后进行第 %d 次重试...", delay, i)
+			time.Sleep(delay)
+		}
+
+		req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, fmt.Errorf("创建图片生成请求失败: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", ac.APIKey))
+
+		resp, err := imageClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("调用图片生成 API 失败: %w", err)
+		}
+
+		respBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("读取图片生成响应失败: %w", err)
+		}
+
+		// 对 429/503 进行重试
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			lastErr = fmt.Errorf("图片生成 API 返回临时错误 (HTTP %d): %s", resp.StatusCode, string(respBytes))
+			continue
+		}
+
+		// 其他非 200 错误直接返回
+		if resp.StatusCode != http.StatusOK {
+			// 尝试解析错误响应中的 content_policy_violation
+			var errResp ImageGenerationResponse
+			if json.Unmarshal(respBytes, &errResp) == nil && errResp.Error != nil {
+				if errResp.Error.Code == "content_policy_violation" {
+					return nil, fmt.Errorf("%w: %s", ErrContentPolicy, errResp.Error.Message)
+				}
+			}
+			return nil, fmt.Errorf("图片生成 API 返回错误 (HTTP %d): %s", resp.StatusCode, string(respBytes))
+		}
+
+		// 解析成功响应
+		var imgResp ImageGenerationResponse
+		if err := json.Unmarshal(respBytes, &imgResp); err != nil {
+			return nil, fmt.Errorf("解析图片生成响应失败: %w", err)
+		}
+
+		// 检查响应体中的错误字段（部分 API 在 200 响应中也可能包含错误）
+		if imgResp.Error != nil {
+			if imgResp.Error.Code == "content_policy_violation" {
+				return nil, fmt.Errorf("%w: %s", ErrContentPolicy, imgResp.Error.Message)
+			}
+			return nil, fmt.Errorf("图片生成 API 返回错误: %s", imgResp.Error.Message)
+		}
+
+		if len(imgResp.Data) == 0 {
+			return nil, fmt.Errorf("图片生成 API 未返回任何图片数据")
+		}
+
+		imgData := imgResp.Data[0]
+
+		// 处理 b64_json 格式
+		if imgData.B64JSON != "" {
+			decoded, err := base64.StdEncoding.DecodeString(imgData.B64JSON)
+			if err != nil {
+				return nil, fmt.Errorf("%w: Base64 解码失败: %v", ErrImageDecode, err)
+			}
+			return decoded, nil
+		}
+
+		// 处理 url 格式
+		if imgData.URL != "" {
+			imgResp2, err := imageClient.Get(imgData.URL)
+			if err != nil {
+				return nil, fmt.Errorf("%w: 下载图片失败: %v", ErrImageDecode, err)
+			}
+			defer imgResp2.Body.Close()
+			imgBytes, err := io.ReadAll(imgResp2.Body)
+			if err != nil {
+				return nil, fmt.Errorf("%w: 读取图片数据失败: %v", ErrImageDecode, err)
+			}
+			return imgBytes, nil
+		}
+
+		return nil, fmt.Errorf("图片生成 API 返回的数据格式无法识别")
+	}
+
+	// 重试耗尽
+	return nil, fmt.Errorf("%w: 重试 %d 次后仍然失败, 最终错误: %v", ErrRateLimitExhausted, maxRetries, lastErr)
 }

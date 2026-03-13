@@ -288,6 +288,7 @@ func setBotCommands(bot *tgbotapi.BotAPI) {
 	commands := []tgbotapi.BotCommand{
 		{Command: "ask", Description: "提问 (用法: /ask 你的问题)"},
 		{Command: "request", Description: "求片 (用法: /request 影视名称)"},
+		{Command: "img", Description: "AI 画图 (用法: /img 图片描述)"},
 	}
 	cfg := tgbotapi.NewSetMyCommands(commands...)
 	if _, err := bot.Request(cfg); err != nil {
@@ -300,6 +301,7 @@ func setBotCommands(bot *tgbotapi.BotAPI) {
 	adminCommands := []tgbotapi.BotCommand{
 		{Command: "ask", Description: "提问 (用法: /ask 你的问题)"},
 		{Command: "request", Description: "求片 (用法: /request 影视名称)"},
+		{Command: "img", Description: "AI 画图 (用法: /img 图片描述)"},
 		{Command: "request_coin_cost", Description: "查看/设置求片费用 (用法: /request_coin_cost [数值])"},
 		{Command: "clear_ctx", Description: "清空当前聊天的上下文记忆"},
 		{Command: "kb_list", Description: "查看当前知识库条目"},

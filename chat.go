@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -527,9 +528,60 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 		}
 		ch.sendReply(msg, fmt.Sprintf("✅ 求片费用已设置为 %d %s", cost, currencyName))
 		return true
+
+	case "img":
+		// 图片生成命令，需同时启用 AI 总开关和图片生成开关
+		group := ch.appConfig.GetGroupConfig(msg.Chat.ID)
+		if group == nil || !group.AIEnabled || !group.AIImageEnabled {
+			return true // 功能未启用，静默忽略
+		}
+		prompt := msg.CommandArguments()
+		if prompt == "" {
+			ch.sendReply(msg, "💡 用法: /img <图片描述>")
+			return true
+		}
+		go ch.handleImageGeneration(msg, prompt, group)
+		return true
 	}
 
 	return false
+}
+
+// handleImageGeneration 处理图片生成请求（/img 命令和工具调用共用）
+func (ch *ChatHandler) handleImageGeneration(msg *tgbotapi.Message, prompt string, group *GroupConfig) error {
+	// 发送"正在上传图片"状态，让用户知道请求正在处理
+	photoAction := tgbotapi.NewChatAction(msg.Chat.ID, tgbotapi.ChatUploadPhoto)
+	ch.bot.Send(photoAction)
+
+	// 调用 AI 图片生成
+	imgData, err := ch.aiClient.GenerateImage(prompt, group.AIImageModel, group.AIImageSize)
+	if err != nil {
+		log.Printf("[AI] 图片生成失败: %v", err)
+		// 根据错误类型返回不同的用户提示
+		switch {
+		case errors.Is(err, ErrContentPolicy):
+			ch.sendReply(msg, "⚠️ 描述内容不符合安全策略，请修改后重试")
+		case errors.Is(err, ErrRateLimitExhausted):
+			ch.sendReply(msg, "⚠️ 图片生成服务繁忙，请稍后重试")
+		case errors.Is(err, ErrImageDecode):
+			ch.sendReply(msg, "⚠️ 图片数据处理失败，请重试")
+		default:
+			ch.sendReply(msg, "⚠️ 图片生成失败，请稍后重试")
+		}
+		return err
+	}
+
+	// 通过 Telegram Bot API 发送图片，引用用户的原始命令消息
+	photoFile := tgbotapi.FileBytes{Name: "generated.png", Bytes: imgData}
+	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, photoFile)
+	photoMsg.ReplyToMessageID = msg.MessageID
+	if _, err := ch.bot.Send(photoMsg); err != nil {
+		log.Printf("[AI] 发送生成图片失败: %v", err)
+		ch.sendReply(msg, "⚠️ 图片发送失败，请重试")
+		return err
+	}
+
+	return nil
 }
 
 // shouldRespond 判断是否需要对该消息进行 AI 回复
@@ -990,6 +1042,28 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		log.Printf("[AI] 启用 TMDB search_tmdb 工具...")
 	}
 
+	// 当群组启用了图片生成功能且配置了模型时，注入 generate_image 工具定义
+	if group.AIImageEnabled && group.AIImageModel != "" {
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "generate_image",
+				Description: "根据用户的文字描述生成图片。当用户要求画图、生成图片、创作图像时使用此工具。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt": map[string]any{
+							"type":        "string",
+							"description": "图片描述文本，详细描述要生成的图片内容",
+						},
+					},
+					"required": []string{"prompt"},
+				},
+			},
+		})
+		log.Printf("[AI] 启用图片生成 generate_image 工具...")
+	}
+
 	// 循环处理 AI 的响应（支持多次连续工具调用）
 	var reply string
 	for i := 0; i < 5; i++ { // 最多允许连续调用5次工具
@@ -1063,6 +1137,50 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 						ToolCallID: tc.ID,
 						Name:       tc.Function.Name,
 						Content:    MessageContent{Text: tmdbResult},
+					})
+				}
+
+				// 处理图片生成工具调用
+				if tc.Function.Name == "generate_image" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 generate_image 参数失败: %v", err)
+						messages = append(messages, ChatMessage{
+							Role:       "tool",
+							ToolCallID: tc.ID,
+							Name:       tc.Function.Name,
+							Content:    MessageContent{Text: fmt.Sprintf("参数解析失败: %v", err)},
+						})
+						continue
+					}
+
+					prompt, _ := args["prompt"].(string)
+					if prompt == "" {
+						messages = append(messages, ChatMessage{
+							Role:       "tool",
+							ToolCallID: tc.ID,
+							Name:       tc.Function.Name,
+							Content:    MessageContent{Text: "缺少 prompt 参数"},
+						})
+						continue
+					}
+
+					log.Printf("[AI] 【触发图片生成】描述: %s", prompt)
+
+					// 调用图片生成并发送到群聊
+					err := ch.handleImageGeneration(msg, prompt, group)
+					var toolResult string
+					if err != nil {
+						toolResult = fmt.Sprintf("图片生成失败: %v", err)
+					} else {
+						toolResult = "图片已成功生成并发送"
+					}
+
+					messages = append(messages, ChatMessage{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Name:       tc.Function.Name,
+						Content:    MessageContent{Text: toolResult},
 					})
 				}
 			}

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 )
 
@@ -51,6 +52,9 @@ type GroupConfig struct {
 	AIEmbyStatsFormat    string           `json:"ai_emby_stats_format"`
 	RequestEnabled       bool             `json:"request_enabled"`   // 求片功能开关，默认 false
 	RequestCoinCost      int              `json:"request_coin_cost"` // 每次求片消耗货币数，默认 0（不消耗）
+	AIImageEnabled       bool             `json:"ai_image_enabled"`  // 图片生成开关，默认 false
+	AIImageModel         string           `json:"ai_image_model"`    // 图片生成模型名称，如 "dall-e-3"
+	AIImageSize          string           `json:"ai_image_size"`     // 图片尺寸，默认 "1024x1024"
 }
 
 // GetGroupConfig 根据 chatID 查找群组配置，O(1) map 查找
@@ -207,6 +211,14 @@ func LoadConfig(filename string) (*AppConfig, error) {
 		}
 		if g.EmbyBossCurrencyName == "" {
 			g.EmbyBossCurrencyName = "鸡蛋"
+		}
+		// 图片生成尺寸默认值
+		if g.AIImageSize == "" {
+			g.AIImageSize = "1024x1024"
+		}
+		// 启用图片生成但未配置模型时输出警告
+		if g.AIImageEnabled && g.AIImageModel == "" {
+			log.Printf("[Warn] 群组 %d 启用了图片生成但未配置模型名称", g.TelegramChatID)
 		}
 	}
 

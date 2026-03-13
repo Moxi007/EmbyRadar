@@ -32,7 +32,10 @@
       "ai_knowledge_dir": "config/knowledge",
       "ai_emby_stats_format": "",
       "request_enabled": false,
-      "request_coin_cost": 0
+      "request_coin_cost": 0,
+      "ai_image_enabled": false,
+      "ai_image_model": "",
+      "ai_image_size": "1024x1024"
     }
   ]
 }
