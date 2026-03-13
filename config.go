@@ -24,7 +24,8 @@ type GlobalConfig struct {
 	AITemperature    float64 `json:"ai_temperature"`
 	AIMaxContext     int     `json:"ai_max_context"`
 	BotAdmins        []int64 `json:"bot_admins"`
-	DBPath           string  `json:"db_path"` // SQLite 数据库路径，默认 config/embyradar.db
+	DBPath           string  `json:"db_path"`      // SQLite 数据库路径，默认 config/embyradar.db
+	TMDBAPIKey       string  `json:"tmdb_api_key"` // TMDB API 密钥，为空时禁用 TMDB 相关功能
 }
 
 // GroupConfig 群组级独立配置，每个 Telegram 群组一份
@@ -48,7 +49,6 @@ type GroupConfig struct {
 	AIRoles              map[int64]string `json:"ai_roles"`
 	AIKnowledgeDir       string           `json:"ai_knowledge_dir"`
 	AIEmbyStatsFormat    string           `json:"ai_emby_stats_format"`
-	TMDBAPIKey           string           `json:"tmdb_api_key"`    // TMDB API 密钥，为空时禁用 TMDB 功能
 	RequestEnabled       bool             `json:"request_enabled"` // 求片功能开关，默认 false
 }
 
@@ -80,6 +80,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 		AIMaxContext     int             `json:"ai_max_context"`
 		BotAdmins        []int64         `json:"bot_admins"`
 		DBPath           string          `json:"db_path"`
+		TMDBAPIKey       string          `json:"tmdb_api_key"`
 		Groups           json.RawMessage `json:"groups"`
 	}
 
@@ -203,6 +204,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 			AIMaxContext:     raw.AIMaxContext,
 			BotAdmins:        raw.BotAdmins,
 			DBPath:           raw.DBPath,
+			TMDBAPIKey:       raw.TMDBAPIKey,
 		},
 		Groups: groups,
 	}

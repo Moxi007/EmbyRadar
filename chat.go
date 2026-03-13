@@ -60,9 +60,9 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 			ch.ebMap[chatID] = NewEmbyBossClient(g.EmbyBossAPIUrl, g.EmbyBossAPIToken)
 		}
 
-		// 初始化 TMDB 客户端（仅当配置了 TMDBAPIKey 时）
-		if g.TMDBAPIKey != "" {
-			ch.tmdbMap[chatID] = NewTMDBClient(g.TMDBAPIKey)
+		// 初始化 TMDB 客户端（仅当全局配置了 TMDBAPIKey 时）
+		if appConfig.Global.TMDBAPIKey != "" {
+			ch.tmdbMap[chatID] = NewTMDBClient(appConfig.Global.TMDBAPIKey)
 		}
 
 		// 初始化知识库实例并加载
@@ -484,7 +484,7 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 	case "request":
 		// /request 命令：提交求片请求
 		group := ch.appConfig.GetGroupConfig(msg.Chat.ID)
-		if group == nil || group.TMDBAPIKey == "" {
+		if group == nil || ch.appConfig.Global.TMDBAPIKey == "" {
 			ch.sendReply(msg, "⚠️ 当前群组未配置 TMDB，无法使用求片功能")
 			return true
 		}
@@ -585,7 +585,7 @@ func (ch *ChatHandler) detectRequestIntent(msg *tgbotapi.Message) bool {
 
 	// 检查群组是否配置了 TMDB 和求片功能
 	group := ch.appConfig.GetGroupConfig(msg.Chat.ID)
-	if group == nil || group.TMDBAPIKey == "" || !group.RequestEnabled {
+	if group == nil || ch.appConfig.Global.TMDBAPIKey == "" || !group.RequestEnabled {
 		return false
 	}
 

@@ -7,6 +7,7 @@
   "ai_temperature": 0.8,
   "ai_max_context": 20,
   "bot_admins": [123456789],
+  "tmdb_api_key": "YOUR_TMDB_API_KEY",
   "groups": [
     {
       "telegram_chat_id": -100123456789,
@@ -30,7 +31,6 @@
       },
       "ai_knowledge_dir": "config/knowledge",
       "ai_emby_stats_format": "",
-      "tmdb_api_key": "YOUR_TMDB_API_KEY",
       "request_enabled": false
     }
   ]
