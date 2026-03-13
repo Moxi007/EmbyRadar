@@ -53,6 +53,16 @@ CREATE TABLE IF NOT EXISTS requests (
 
 CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
 CREATE INDEX IF NOT EXISTS idx_requests_dedup ON requests(chat_id, user_id, tmdb_id, status);
+
+CREATE TABLE IF NOT EXISTS admin_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    admin_id   INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    FOREIGN KEY (request_id) REFERENCES requests(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_messages_request ON admin_messages(request_id);
 `
 
 // NewRequestStore 创建并初始化数据库连接，自动创建目录和执行建表迁移
@@ -263,4 +273,44 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// AdminMessage 管理员消息记录，用于审批后同步更新所有管理员的消息
+type AdminMessage struct {
+	AdminID   int64 // 管理员 Telegram ID
+	MessageID int   // 消息 ID
+}
+
+// SaveAdminMessage 保存管理员收到的求片消息 ID
+func (s *RequestStore) SaveAdminMessage(requestID int64, adminID int64, messageID int) error {
+	_, err := s.db.Exec(
+		`INSERT INTO admin_messages (request_id, admin_id, message_id) VALUES (?, ?, ?)`,
+		requestID, adminID, messageID,
+	)
+	if err != nil {
+		return fmt.Errorf("保存管理员消息记录失败: %w", err)
+	}
+	return nil
+}
+
+// GetAdminMessages 查询指定求片记录对应的所有管理员消息
+func (s *RequestStore) GetAdminMessages(requestID int64) ([]AdminMessage, error) {
+	rows, err := s.db.Query(
+		`SELECT admin_id, message_id FROM admin_messages WHERE request_id = ?`,
+		requestID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("查询管理员消息失败: %w", err)
+	}
+	defer rows.Close()
+
+	var msgs []AdminMessage
+	for rows.Next() {
+		var m AdminMessage
+		if err := rows.Scan(&m.AdminID, &m.MessageID); err != nil {
+			return nil, fmt.Errorf("扫描管理员消息失败: %w", err)
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
 }

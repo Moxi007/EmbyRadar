@@ -547,6 +547,7 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	}
 
 	// 数据库去重和写入
+	var record *RequestRecord
 	if rh.store != nil {
 		exists, err := rh.store.HasActiveRequest(cbData.ChatID, cbData.UserID, selected.ID)
 		if err != nil {
@@ -563,7 +564,7 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 			return
 		}
 
-		record := &RequestRecord{
+		record = &RequestRecord{
 			ChatID:     cbData.ChatID,
 			UserID:     cbData.UserID,
 			UserName:   session.UserName,
@@ -600,10 +601,16 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		forwardMsg := tgbotapi.NewMessage(adminID, adminMsg)
 		forwardMsg.ParseMode = "Markdown"
 		forwardMsg.ReplyMarkup = keyboard
-		if _, err := ch.bot.Send(forwardMsg); err != nil {
+		if sentMsg, err := ch.bot.Send(forwardMsg); err != nil {
 			log.Printf("[求片] 向管理员 %d 转发求片请求失败: %v", adminID, err)
 		} else {
 			forwardSuccess++
+			// 记录管理员消息 ID，用于审批后同步更新所有管理员的消息
+			if rh.store != nil && record != nil {
+				if err := rh.store.SaveAdminMessage(record.ID, adminID, sentMsg.MessageID); err != nil {
+					log.Printf("[求片] 保存管理员 %d 消息记录失败: %v", adminID, err)
+				}
+			}
 		}
 	}
 
@@ -842,20 +849,48 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		}
 	}
 
-	// 更新管理员私聊中的消息：替换标题为处理结果标记，并移除按钮
-	if query.Message != nil {
+	// 更新所有管理员私聊中的消息：替换标题为处理结果标记，并移除按钮
+	// 通过数据库查询所有管理员的消息 ID，确保每个管理员的消息都被更新
+	if dbRecord != nil && rh.store != nil {
+		adminMsgs, err := rh.store.GetAdminMessages(dbRecord.ID)
+		if err != nil {
+			log.Printf("[求片] 查询管理员消息记录失败: %v", err)
+		}
+		for _, am := range adminMsgs {
+			// 对于当前点击的管理员，使用原消息文本来构建新文本
+			// 对于其他管理员，也使用相同的状态标记
+			var newText string
+			if query.Message != nil && am.AdminID == query.Message.Chat.ID && am.MessageID == query.Message.MessageID {
+				originalText := query.Message.Text
+				newText = strings.Replace(originalText, "🎬 新求片请求", statusLabel, 1)
+				if newText == originalText {
+					newText = statusLabel + "\n" + originalText
+				}
+			} else {
+				// 其他管理员的消息无法获取原文，直接用状态标记
+				newText = statusLabel
+			}
+
+			editMsg := tgbotapi.NewEditMessageText(am.AdminID, am.MessageID, newText)
+			emptyMarkup := tgbotapi.InlineKeyboardMarkup{
+				InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{},
+			}
+			editMsg.ReplyMarkup = &emptyMarkup
+			if _, err := ch.bot.Request(editMsg); err != nil {
+				log.Printf("[求片] 更新管理员 %d 消息 %d 失败: %v", am.AdminID, am.MessageID, err)
+			}
+		}
+	} else if query.Message != nil {
+		// 回退逻辑：数据库不可用时只更新当前管理员的消息
 		adminChatID := query.Message.Chat.ID
 		adminMsgID := query.Message.MessageID
 		originalText := query.Message.Text
 
-		// 将原消息开头的 "🎬 新求片请求" 替换为处理结果标记
 		newText := strings.Replace(originalText, "🎬 新求片请求", statusLabel, 1)
-		// 若原文本中没有预期的标题前缀，则直接在前面加上标记
 		if newText == originalText {
 			newText = statusLabel + "\n" + originalText
 		}
 
-		// 编辑消息文本并同时移除 Inline Keyboard 按钮
 		editMsg := tgbotapi.NewEditMessageText(adminChatID, adminMsgID, newText)
 		emptyMarkup := tgbotapi.InlineKeyboardMarkup{
 			InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{},
