@@ -281,21 +281,39 @@ func initLogger() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 }
 
-// setBotCommands 设置机器人命令菜单，使私聊界面出现快捷菜单
+// setBotCommands 设置机器人命令菜单，使聊天界面出现快捷菜单。
+// 普通用户看到基础命令，管理员额外看到管理类命令。
 func setBotCommands(bot *tgbotapi.BotAPI) {
+	// 普通用户可见的命令（默认作用域）
 	commands := []tgbotapi.BotCommand{
 		{Command: "ask", Description: "提问 (用法: /ask 你的问题)"},
-		{Command: "clear_ctx", Description: "清空当前聊天的上下文记忆"},
-		{Command: "kb_list", Description: "[管理] 查看当前知识库条目"},
-		{Command: "kb_add", Description: "[管理] 添加知识库 (用法: /kb_add 词条 内容)"},
-		{Command: "kb_del", Description: "[管理] 删除知识库 (用法: /kb_del 词条)"},
-		{Command: "reload_kb", Description: "[管理] 重新加载知识库 (从文件)"},
 		{Command: "request", Description: "求片 (用法: /request 影视名称)"},
 	}
 	cfg := tgbotapi.NewSetMyCommands(commands...)
 	if _, err := bot.Request(cfg); err != nil {
 		log.Printf("[Warn] 设置 Bot 命令菜单失败: %v", err)
 	} else {
-		log.Printf("[Bot] 命令菜单已成功注册")
+		log.Printf("[Bot] 普通用户命令菜单已注册")
+	}
+
+	// 群聊管理员可见的完整命令列表
+	adminCommands := []tgbotapi.BotCommand{
+		{Command: "ask", Description: "提问 (用法: /ask 你的问题)"},
+		{Command: "request", Description: "求片 (用法: /request 影视名称)"},
+		{Command: "request_coin_cost", Description: "查看/设置求片费用 (用法: /request_coin_cost [数值])"},
+		{Command: "clear_ctx", Description: "清空当前聊天的上下文记忆"},
+		{Command: "kb_list", Description: "查看当前知识库条目"},
+		{Command: "kb_add", Description: "添加知识库 (用法: /kb_add 词条 内容)"},
+		{Command: "kb_del", Description: "删除知识库 (用法: /kb_del 词条)"},
+		{Command: "reload_kb", Description: "重新加载知识库 (从文件)"},
+	}
+	adminScope := tgbotapi.NewSetMyCommandsWithScope(
+		tgbotapi.NewBotCommandScopeAllChatAdministrators(),
+		adminCommands...,
+	)
+	if _, err := bot.Request(adminScope); err != nil {
+		log.Printf("[Warn] 设置管理员命令菜单失败: %v", err)
+	} else {
+		log.Printf("[Bot] 管理员命令菜单已注册")
 	}
 }

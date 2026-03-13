@@ -23,7 +23,7 @@ type RequestRecord struct {
 	Year        string     // 年份
 	IsRemaster  bool       // 是否洗版
 	Status      string     // pending/approved/rejected/fulfilled/expired
-	CoinCost    int        // 本次求片实际扣除的金币数，用于拒绝时退还
+	CoinCost    int        // 本次求片实际扣除的货币数，用于拒绝时退还
 	CreatedAt   time.Time  // 创建时间
 	ApprovedAt  *time.Time // 审批时间（可为空）
 	FulfilledAt *time.Time // 入库确认时间（可为空）

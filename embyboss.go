@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -87,14 +88,14 @@ func (c *EmbyBossClient) GetUserInfo(tgID int64) (*UserInfoResponse, error) {
 	return &userInfo, nil
 }
 
-// DeductCoins 扣除指定用户的金币
+// DeductCoins 扣除指定用户的货币
 // 调用 EmbyBoss 的 /user/deduct 接口，参数通过 query string 传递
 func (c *EmbyBossClient) DeductCoins(tgID int64, amount int, reason string) error {
-	url := fmt.Sprintf("%s/user/deduct?tg=%d&amount=%d&reason=%s&token=%s",
-		c.BaseURL, tgID, amount, reason, c.APIToken)
-	log.Printf("[EmbyBoss] 正在扣除金币: tg=%d, amount=%d, reason=%s", tgID, amount, reason)
+	reqURL := fmt.Sprintf("%s/user/deduct?tg=%d&amount=%d&reason=%s&token=%s",
+		c.BaseURL, tgID, amount, url.QueryEscape(reason), c.APIToken)
+	log.Printf("[EmbyBoss] 正在扣除货币: tg=%d, amount=%d, reason=%s", tgID, amount, reason)
 
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := http.NewRequest("POST", reqURL, nil)
 	if err != nil {
 		return fmt.Errorf("创建扣币请求失败: %w", err)
 	}
@@ -127,18 +128,18 @@ func (c *EmbyBossClient) DeductCoins(tgID int64, amount int, reason string) erro
 		return fmt.Errorf("EmbyBoss 扣币失败: %s", result.Message)
 	}
 
-	log.Printf("[EmbyBoss] 成功扣除金币: tg=%d, amount=%d", tgID, amount)
+	log.Printf("[EmbyBoss] 成功扣除货币: tg=%d, amount=%d", tgID, amount)
 	return nil
 }
 
-// RefundCoins 退还指定用户的金币
+// RefundCoins 退还指定用户的货币
 // 调用 EmbyBoss 的 /user/refund 接口，参数通过 query string 传递
 func (c *EmbyBossClient) RefundCoins(tgID int64, amount int, reason string) error {
-	url := fmt.Sprintf("%s/user/refund?tg=%d&amount=%d&reason=%s&token=%s",
-		c.BaseURL, tgID, amount, reason, c.APIToken)
-	log.Printf("[EmbyBoss] 正在退还金币: tg=%d, amount=%d, reason=%s", tgID, amount, reason)
+	reqURL := fmt.Sprintf("%s/user/refund?tg=%d&amount=%d&reason=%s&token=%s",
+		c.BaseURL, tgID, amount, url.QueryEscape(reason), c.APIToken)
+	log.Printf("[EmbyBoss] 正在退还货币: tg=%d, amount=%d, reason=%s", tgID, amount, reason)
 
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := http.NewRequest("POST", reqURL, nil)
 	if err != nil {
 		return fmt.Errorf("创建退币请求失败: %w", err)
 	}
@@ -171,7 +172,7 @@ func (c *EmbyBossClient) RefundCoins(tgID int64, amount int, reason string) erro
 		return fmt.Errorf("EmbyBoss 退币失败: %s", result.Message)
 	}
 
-	log.Printf("[EmbyBoss] 成功退还金币: tg=%d, amount=%d", tgID, amount)
+	log.Printf("[EmbyBoss] 成功退还货币: tg=%d, amount=%d", tgID, amount)
 	return nil
 }
 

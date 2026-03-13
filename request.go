@@ -604,40 +604,40 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		return
 	}
 
-	// 金币检查与扣除：当群组配置了金币费用且有 EmbyBoss 客户端时执行
+	// 货币检查与扣除：当群组配置了求片费用且有 EmbyBoss 客户端时执行
 	coinCost := 0
 	group := ch.appConfig.GetGroupConfig(cbData.ChatID)
 	ebClient := ch.ebMap[cbData.ChatID]
 	if group != nil && group.RequestCoinCost > 0 && ebClient != nil {
-		// 查询用户金币余额
+		currencyName := ch.getCurrencyName(cbData.ChatID)
+		// 查询用户货币余额
 		userInfo, err := ebClient.GetUserInfo(cbData.UserID)
 		if err != nil {
-			log.Printf("[求片] 金币余额查询失败 (user=%d): %v", cbData.UserID, err)
-			reply := tgbotapi.NewMessage(cbData.ChatID, "金币余额查询失败，请稍后再试")
+			log.Printf("[求片] 货币余额查询失败 (user=%d): %v", cbData.UserID, err)
+			reply := tgbotapi.NewMessage(cbData.ChatID, fmt.Sprintf("%s余额查询失败，请稍后再试", currencyName))
 			ch.bot.Send(reply)
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
 		}
 		balance := userInfo.Data.Iv
 		if balance < group.RequestCoinCost {
-			currencyName := ch.getCurrencyName(cbData.ChatID)
 			reply := tgbotapi.NewMessage(cbData.ChatID, fmt.Sprintf(
-				"金币不足，当前余额 %d %s，求片需要 %d %s",
-				balance, currencyName, group.RequestCoinCost, currencyName))
+				"%s不足，当前余额 %d %s，求片需要 %d %s",
+				currencyName, balance, currencyName, group.RequestCoinCost, currencyName))
 			ch.bot.Send(reply)
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
 		}
-		// 扣除金币
+		// 扣除货币
 		if err := ebClient.DeductCoins(cbData.UserID, group.RequestCoinCost, "求片扣费"); err != nil {
-			log.Printf("[求片] 金币扣除失败 (user=%d, cost=%d): %v", cbData.UserID, group.RequestCoinCost, err)
-			reply := tgbotapi.NewMessage(cbData.ChatID, "金币扣除失败，请稍后再试")
+			log.Printf("[求片] 货币扣除失败 (user=%d, cost=%d): %v", cbData.UserID, group.RequestCoinCost, err)
+			reply := tgbotapi.NewMessage(cbData.ChatID, fmt.Sprintf("%s扣除失败，请稍后再试", currencyName))
 			ch.bot.Send(reply)
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
 		}
 		coinCost = group.RequestCoinCost
-		log.Printf("[求片] 金币扣除成功 (user=%d, cost=%d)", cbData.UserID, coinCost)
+		log.Printf("[求片] 货币扣除成功 (user=%d, cost=%d)", cbData.UserID, coinCost)
 	}
 
 	// 数据库去重和写入
@@ -968,14 +968,14 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		}
 	}
 
-	// 拒绝时退还金币
+	// 拒绝时退还货币
 	if dbRecord != nil && dbRecord.CoinCost > 0 && (cbData.Action == "reject" || cbData.Action == "reject_no_resource") {
 		ebClient := ch.ebMap[cbData.ChatID]
 		if ebClient != nil {
 			if err := ebClient.RefundCoins(cbData.UserID, dbRecord.CoinCost, "求片被拒绝退还"); err != nil {
-				log.Printf("[求片] 金币退还失败 (userID=%d, requestID=%d, 应退金币=%d): %v", cbData.UserID, dbRecord.ID, dbRecord.CoinCost, err)
+				log.Printf("[求片] 货币退还失败 (userID=%d, requestID=%d, 应退=%d): %v", cbData.UserID, dbRecord.ID, dbRecord.CoinCost, err)
 			} else {
-				log.Printf("[求片] 金币退还成功 (userID=%d, amount=%d)", cbData.UserID, dbRecord.CoinCost)
+				log.Printf("[求片] 货币退还成功 (userID=%d, amount=%d)", cbData.UserID, dbRecord.CoinCost)
 			}
 		}
 	}

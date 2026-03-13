@@ -50,7 +50,7 @@ type GroupConfig struct {
 	AIKnowledgeDir       string           `json:"ai_knowledge_dir"`
 	AIEmbyStatsFormat    string           `json:"ai_emby_stats_format"`
 	RequestEnabled       bool             `json:"request_enabled"`   // 求片功能开关，默认 false
-	RequestCoinCost      int              `json:"request_coin_cost"` // 每次求片消耗金币数，默认 0（不消耗）
+	RequestCoinCost      int              `json:"request_coin_cost"` // 每次求片消耗货币数，默认 0（不消耗）
 }
 
 // GetGroupConfig 根据 chatID 查找群组配置，O(1) map 查找
