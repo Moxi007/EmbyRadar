@@ -261,11 +261,10 @@ func FormatAdminMessage(session *RequestSession, groupName string, existingItems
 
 	var sb strings.Builder
 	sb.WriteString("🎬 新求片请求\n\n")
-	sb.WriteString(fmt.Sprintf("📌 影片：%s\n", titleLine))
+	sb.WriteString(fmt.Sprintf("📌 影片：[%s](%s)\n", cleanMarkdownName(titleLine), result.GetTMDBURL()))
 	sb.WriteString(fmt.Sprintf("📅 年份：%s\n", result.GetYear()))
 	sb.WriteString(fmt.Sprintf("🎭 类型：%s\n", mediaTypeStr))
-	sb.WriteString(fmt.Sprintf("🔗 TMDB：%s\n", result.GetTMDBURL()))
-	sb.WriteString(fmt.Sprintf("👤 请求者：[%s](tg://user?id=%d)\n", session.UserName, session.UserID))
+	sb.WriteString(fmt.Sprintf("👤 请求者：[%s](tg://user?id=%d)\n", cleanMarkdownName(session.UserName), session.UserID))
 
 	// 仅当洗版请求时显示洗版标记和现有版本质量信息
 	if session.IsRemaster {
@@ -284,10 +283,10 @@ func FormatAdminMessage(session *RequestSession, groupName string, existingItems
 	}
 
 	// 构建群组链接：将负数 chat_id 转换为 Telegram 群组链接格式
-	groupLink := groupName
+	groupLink := cleanMarkdownName(groupName)
 	chatIDStr := fmt.Sprintf("%d", session.ChatID)
 	if strings.HasPrefix(chatIDStr, "-100") {
-		groupLink = fmt.Sprintf("[%s](https://t.me/c/%s/1)", groupName, chatIDStr[4:])
+		groupLink = fmt.Sprintf("[%s](https://t.me/c/%s/1)", cleanMarkdownName(groupName), chatIDStr[4:])
 	}
 	sb.WriteString(fmt.Sprintf("\n来自群组：%s", groupLink))
 
@@ -505,18 +504,21 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	callback := tgbotapi.NewCallback(query.ID, fmt.Sprintf("已选择：%s", selected.GetDisplayTitle()))
 	ch.bot.Request(callback)
 
-	// 更新原消息：替换按钮列表为选中结果，移除按钮
+	// 更新原消息：替换按钮列表为选中结果（Markdown 超链接），移除按钮
 	if query.Message != nil {
 		mediaIcon := "🎬"
 		if selected.MediaType == "tv" {
 			mediaIcon = "📺"
 		}
-		editText := fmt.Sprintf("%s 已选择：%s（%s）\n🔗 %s",
-			mediaIcon, selected.GetDisplayTitle(), selected.GetYear(), selected.GetTMDBURL())
+		editText := fmt.Sprintf("%s 已选择：[%s（%s）](%s)",
+			mediaIcon, cleanMarkdownName(selected.GetDisplayTitle()), selected.GetYear(), selected.GetTMDBURL())
 		editMsg := tgbotapi.NewEditMessageText(cbData.ChatID, query.Message.MessageID, editText)
+		editMsg.ParseMode = "Markdown"
 		emptyMarkup := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}}
 		editMsg.ReplyMarkup = &emptyMarkup
-		ch.bot.Request(editMsg)
+		if _, err := ch.bot.Request(editMsg); err != nil {
+			log.Printf("[求片] 更新选择确认消息失败: %v", err)
+		}
 	}
 
 	// 进行 Emby 库存查重
@@ -588,6 +590,8 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	adminMsg := FormatAdminMessage(session, groupName, checkResult.ExistingItems)
 	keyboard := BuildApprovalKeyboard(session)
 
+	log.Printf("[求片] 准备转发管理员，管理员列表: %v，影片: %s", ch.appConfig.Global.BotAdmins, selected.GetDisplayTitle())
+
 	forwardSuccess := 0
 	for _, adminID := range ch.appConfig.Global.BotAdmins {
 		forwardMsg := tgbotapi.NewMessage(adminID, adminMsg)
@@ -642,7 +646,7 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		}
 	}
 
-	userLink := fmt.Sprintf("[%s](tg://user?id=%d)", userName, cbData.UserID)
+	userLink := fmt.Sprintf("[%s](tg://user?id=%d)", cleanMarkdownName(userName), cbData.UserID)
 	var notifyText string
 	var statusLabel string
 

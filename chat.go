@@ -115,7 +115,7 @@ func (ch *ChatHandler) StartListening() {
 			if strings.HasPrefix(update.CallbackQuery.Data, "request:") {
 				ch.requestHandler.HandleCallbackQuery(ch, update.CallbackQuery)
 			} else if strings.HasPrefix(update.CallbackQuery.Data, "reqsel:") {
-				ch.requestHandler.HandleSelectCallback(ch, update.CallbackQuery)
+				go ch.requestHandler.HandleSelectCallback(ch, update.CallbackQuery)
 			}
 			continue
 		}
@@ -626,10 +626,14 @@ func (ch *ChatHandler) detectRequestIntent(msg *tgbotapi.Message) bool {
 	return false
 }
 
-// cleanMarkdownName 移除名字中的中括号或括号，防止破坏 Markdown 的 [text](url) 语法
+// cleanMarkdownName 移除名字中可能破坏 Telegram Markdown 语法的特殊字符
+// 替换中括号为中文引号，转义下划线、星号、反引号等
 func cleanMarkdownName(name string) string {
 	name = strings.ReplaceAll(name, "[", "「")
 	name = strings.ReplaceAll(name, "]", "」")
+	name = strings.ReplaceAll(name, "_", "\\_")
+	name = strings.ReplaceAll(name, "*", "\\*")
+	name = strings.ReplaceAll(name, "`", "\\`")
 	return name
 }
 
