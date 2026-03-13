@@ -23,14 +23,15 @@
       "welcome_code_prompt": "这是系统通知：新用户 %s 刚刚使用注册码获得了入驻资格！请欢迎他。",
       "ai_enabled": true,
       "ai_search_enabled": true,
-      "ai_google_search_grounding": false,
       "ai_system_prompt": "你是一个群聊助手，请保持回复简洁友好。",
       "ai_trigger_keywords": ["助手", "机器人"],
       "ai_roles": {
         "123456789": "管理员"
       },
       "ai_knowledge_dir": "config/knowledge",
-      "ai_emby_stats_format": ""
+      "ai_emby_stats_format": "",
+      "tmdb_api_key": "YOUR_TMDB_API_KEY",
+      "request_enabled": false
     }
   ]
 }

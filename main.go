@@ -58,7 +58,25 @@ func main() {
 	if hasAIEnabled {
 		aiClient := NewAIClient(&appConfig.Global)
 		ctxManager := NewContextManager(appConfig.Global.AIMaxContext)
-		chatHandler := NewChatHandler(bot, aiClient, ctxManager, appConfig)
+
+		// 初始化 SQLite 数据库
+		dbPath := appConfig.Global.DBPath
+		if dbPath == "" {
+			dbPath = "config/embyradar.db"
+		}
+		store, err := NewRequestStore(dbPath)
+		if err != nil {
+			log.Fatalf("初始化数据库失败: %v", err)
+		}
+
+		// 创建求片处理器并注入数据库访问层
+		requestHandler := NewRequestHandler(store)
+
+		chatHandler := NewChatHandler(bot, aiClient, ctxManager, appConfig, requestHandler)
+
+		// 创建 Poller 轮询器并启动（复用 chatHandler 的 embyMap）
+		poller := NewPoller(store, chatHandler.embyMap, bot, 30*time.Minute)
+		poller.Start()
 
 		// 在独立 goroutine 中启动消息监听
 		go chatHandler.StartListening()
@@ -74,19 +92,32 @@ func main() {
 
 		// 注册快捷命令菜单
 		setBotCommands(bot)
+
+		// 监听退出信号，优雅关闭数据库和 Poller
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		// 4. 启动所有群组的状态监控
+		StartAllStatusUpdaters(bot, appConfig)
+
+		sig := <-sigCh
+		log.Printf("收到退出信号 %v，正在优雅退出...", sig)
+		poller.Stop()
+		store.Close()
+		log.Printf("数据库和轮询器已关闭，程序退出")
 	} else {
 		log.Printf("[AI] AI 聊天模块未启用")
+
+		// 4. 启动所有群组的状态监控
+		StartAllStatusUpdaters(bot, appConfig)
+
+		// 监听退出信号以便优雅退出
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		sig := <-sigCh
+		log.Printf("收到退出信号 %v，程序退出", sig)
 	}
-
-	// 4. 启动所有群组的状态监控（每个群组独立 goroutine 和定时器）
-	StartAllStatusUpdaters(bot, appConfig)
-
-	// 监听退出信号以便优雅退出
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	sig := <-sigCh
-	log.Printf("收到退出信号 %v，程序退出", sig)
 }
 
 // updateStatus 获取 Emby 数据并发送或编辑该群组的置顶状态消息
@@ -259,6 +290,7 @@ func setBotCommands(bot *tgbotapi.BotAPI) {
 		{Command: "kb_add", Description: "[管理] 添加知识库 (用法: /kb_add 词条 内容)"},
 		{Command: "kb_del", Description: "[管理] 删除知识库 (用法: /kb_del 词条)"},
 		{Command: "reload_kb", Description: "[管理] 重新加载知识库 (从文件)"},
+		{Command: "request", Description: "求片 (用法: /request 影视名称)"},
 	}
 	cfg := tgbotapi.NewSetMyCommands(commands...)
 	if _, err := bot.Request(cfg); err != nil {

@@ -41,51 +41,59 @@ func (kb *KnowledgeBase) Load() error {
 	const maxTotalSize = 50 * 1024 // 知识库总大小限制 50KB，避免 token 超限
 	const maxFileSize = 20 * 1024  // 单文件最大 20KB
 
-	err := filepath.Walk(kb.dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
+	// 只读取当前目录下的文件，不递归进入子目录，
+	// 避免通用知识库加载到群组专属子目录的内容
+	entries, err := os.ReadDir(kb.dir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
 
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".md" && ext != ".txt" {
-			return nil
+			ext := strings.ToLower(filepath.Ext(entry.Name()))
+			if ext != ".md" && ext != ".txt" {
+				continue
+			}
+
+			info, err := entry.Info()
+			if err != nil {
+				log.Printf("[知识库] 获取文件信息失败: %s: %v", entry.Name(), err)
+				continue
+			}
+
+			// 检查单文件大小
+			if info.Size() > int64(maxFileSize) {
+				log.Printf("[知识库] 跳过过大的文件: %s (%.1fKB > %dKB)", entry.Name(), float64(info.Size())/1024, maxFileSize/1024)
+				continue
+			}
+
+			path := filepath.Join(kb.dir, entry.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				log.Printf("[知识库] 读取文件失败: %s: %v", path, err)
+				continue
+			}
+
+			content := strings.TrimSpace(string(data))
+			if content == "" {
+				continue
+			}
+
+			// 检查总大小
+			if totalSize+len(content) > maxTotalSize {
+				log.Printf("[知识库] 知识库总量已达上限 (%dKB)，跳过: %s", maxTotalSize/1024, entry.Name())
+				break
+			}
+
+			// 用文件名作为标题
+			fileName := strings.TrimSuffix(entry.Name(), ext)
+			section := fmt.Sprintf("## %s\n\n%s", fileName, content)
+			parts = append(parts, section)
+			totalSize += len(content)
+
+			log.Printf("[知识库] 加载文件: %s (%.1fKB)", entry.Name(), float64(len(content))/1024)
 		}
-
-		// 检查单文件大小
-		if info.Size() > int64(maxFileSize) {
-			log.Printf("[知识库] 跳过过大的文件: %s (%.1fKB > %dKB)", path, float64(info.Size())/1024, maxFileSize/1024)
-			return nil
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			log.Printf("[知识库] 读取文件失败: %s: %v", path, err)
-			return nil
-		}
-
-		content := strings.TrimSpace(string(data))
-		if content == "" {
-			return nil
-		}
-
-		// 检查总大小
-		if totalSize+len(content) > maxTotalSize {
-			log.Printf("[知识库] 知识库总量已达上限 (%dKB)，跳过: %s", maxTotalSize/1024, path)
-			return nil
-		}
-
-		// 用文件名作为标题
-		fileName := strings.TrimSuffix(filepath.Base(path), ext)
-		section := fmt.Sprintf("## %s\n\n%s", fileName, content)
-		parts = append(parts, section)
-		totalSize += len(content)
-
-		log.Printf("[知识库] 加载文件: %s (%.1fKB)", filepath.Base(path), float64(len(content))/1024)
-		return nil
-	})
+	}
 
 	if err != nil {
 		return fmt.Errorf("遍历知识库目录失败: %w", err)
@@ -248,26 +256,28 @@ func (kb *KnowledgeBase) DeleteEntry(name string) error {
 	return kb.Reload()
 }
 
-// ListEntries 获取当前所有知识库条目名称及大小
+// ListEntries 获取当前目录下的知识库条目名称及大小（不递归子目录）
 func (kb *KnowledgeBase) ListEntries() ([]string, error) {
 	var entries []string
 
-	err := filepath.Walk(kb.dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext == ".md" || ext == ".txt" {
-			entries = append(entries, fmt.Sprintf("- `%s` (%.1f KB)", info.Name(), float64(info.Size())/1024))
-		}
-		return nil
-	})
-
+	dirEntries, err := os.ReadDir(kb.dir)
 	if err != nil {
 		return nil, fmt.Errorf("读取目录失败: %w", err)
 	}
+
+	for _, entry := range dirEntries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if ext == ".md" || ext == ".txt" {
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			entries = append(entries, fmt.Sprintf("- `%s` (%.1f KB)", info.Name(), float64(info.Size())/1024))
+		}
+	}
+
 	return entries, nil
 }

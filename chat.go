@@ -13,26 +13,31 @@ import (
 
 // ChatHandler 处理群聊消息与 AI 回复
 type ChatHandler struct {
-	bot        *tgbotapi.BotAPI
-	aiClient   *AIClient                 // 全局共享的 AI 客户端
-	ctxManager *ContextManager           // 全局共享，内部按 chatID 隔离
-	appConfig  *AppConfig                // 全局应用配置
-	globalKB   *KnowledgeBase            // 通用知识库，所有群组共享
-	kbMap      map[int64]*KnowledgeBase  // chatID → 独立知识库
-	embyMap    map[int64]*EmbyClient     // chatID → 独立 Emby 客户端
-	ebMap      map[int64]*EmbyBossClient // chatID → 独立 EmbyBoss 客户端
+	bot            *tgbotapi.BotAPI
+	aiClient       *AIClient                 // 全局共享的 AI 客户端
+	ctxManager     *ContextManager           // 全局共享，内部按 chatID 隔离
+	appConfig      *AppConfig                // 全局应用配置
+	globalKB       *KnowledgeBase            // 通用知识库，所有群组共享
+	kbMap          map[int64]*KnowledgeBase  // chatID → 独立知识库
+	embyMap        map[int64]*EmbyClient     // chatID → 独立 Emby 客户端
+	ebMap          map[int64]*EmbyBossClient // chatID → 独立 EmbyBoss 客户端
+	tmdbMap        map[int64]*TMDBClient     // chatID → 独立 TMDB 客户端
+	requestHandler *RequestHandler           // 全局求片处理器
 }
 
 // NewChatHandler 创建聊天处理器，遍历所有群组配置初始化各群组的独立客户端
-func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *ContextManager, appConfig *AppConfig) *ChatHandler {
+// requestHandler 由外部创建并传入，确保 store 注入和 Poller 复用 embyMap
+func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *ContextManager, appConfig *AppConfig, requestHandler *RequestHandler) *ChatHandler {
 	ch := &ChatHandler{
-		bot:        bot,
-		aiClient:   aiClient,
-		ctxManager: ctxManager,
-		appConfig:  appConfig,
-		kbMap:      make(map[int64]*KnowledgeBase),
-		embyMap:    make(map[int64]*EmbyClient),
-		ebMap:      make(map[int64]*EmbyBossClient),
+		bot:            bot,
+		aiClient:       aiClient,
+		ctxManager:     ctxManager,
+		appConfig:      appConfig,
+		kbMap:          make(map[int64]*KnowledgeBase),
+		embyMap:        make(map[int64]*EmbyClient),
+		ebMap:          make(map[int64]*EmbyBossClient),
+		tmdbMap:        make(map[int64]*TMDBClient),
+		requestHandler: requestHandler,
 	}
 
 	// 初始化通用知识库（所有群组共享，路径固定为 config/knowledge）
@@ -53,6 +58,11 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 		// 初始化 EmbyBoss 客户端（仅当配置了 EmbyBossAPIToken 时）
 		if g.EmbyBossAPIToken != "" {
 			ch.ebMap[chatID] = NewEmbyBossClient(g.EmbyBossAPIUrl, g.EmbyBossAPIToken)
+		}
+
+		// 初始化 TMDB 客户端（仅当配置了 TMDBAPIKey 时）
+		if g.TMDBAPIKey != "" {
+			ch.tmdbMap[chatID] = NewTMDBClient(g.TMDBAPIKey)
 		}
 
 		// 初始化知识库实例并加载
@@ -87,7 +97,7 @@ func (ch *ChatHandler) StartListening() {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	// 显式声明需要接收 my_chat_member 更新，用于检测 Bot 被添加到群组的事件
-	u.AllowedUpdates = []string{"message", "my_chat_member"}
+	u.AllowedUpdates = []string{"message", "my_chat_member", "callback_query"}
 
 	updates := ch.bot.GetUpdatesChan(u)
 
@@ -100,6 +110,14 @@ func (ch *ChatHandler) StartListening() {
 			continue
 		}
 
+		// 处理管理员审批回调（Inline Keyboard 按钮点击）
+		if update.CallbackQuery != nil {
+			if strings.HasPrefix(update.CallbackQuery.Data, "request:") {
+				ch.requestHandler.HandleCallbackQuery(ch, update.CallbackQuery)
+			}
+			continue
+		}
+
 		if update.Message == nil {
 			continue
 		}
@@ -108,6 +126,20 @@ func (ch *ChatHandler) StartListening() {
 		if update.Message.Chat.Type != "private" {
 			if !ch.appConfig.IsAuthorizedGroup(update.Message.Chat.ID) {
 				continue // 忽略未配置群组的消息
+			}
+		}
+
+		// 检测求片意图关键词（@ Bot + 求片关键词），优先于命令和 AI 回复处理
+		if ch.detectRequestIntent(update.Message) {
+			go ch.requestHandler.HandleRequest(ch, update.Message, update.Message.Text)
+			continue
+		}
+
+		// 检测用户是否有活跃的求片确认会话
+		if update.Message.From != nil {
+			if session := ch.requestHandler.GetSession(update.Message.Chat.ID, update.Message.From.ID); session != nil && session.State == StateWaitConfirm {
+				go ch.requestHandler.HandleConfirmation(ch, update.Message)
+				continue
 			}
 		}
 
@@ -448,6 +480,25 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 
 		go ch.handleAIResponse(msg)
 		return true
+
+	case "request":
+		// /request 命令：提交求片请求
+		group := ch.appConfig.GetGroupConfig(msg.Chat.ID)
+		if group == nil || group.TMDBAPIKey == "" {
+			ch.sendReply(msg, "⚠️ 当前群组未配置 TMDB，无法使用求片功能")
+			return true
+		}
+		if !group.RequestEnabled {
+			ch.sendReply(msg, "⚠️ 当前群组未开启求片功能")
+			return true
+		}
+		args := msg.CommandArguments()
+		if args == "" {
+			ch.sendReply(msg, "💡 用法: /request <影视名称>")
+			return true
+		}
+		go ch.requestHandler.HandleRequest(ch, msg, args)
+		return true
 	}
 
 	return false
@@ -518,6 +569,63 @@ func (ch *ChatHandler) shouldRespond(msg *tgbotapi.Message) bool {
 			if strings.Contains(lowerText, strings.ToLower(keyword)) {
 				return true
 			}
+		}
+	}
+
+	return false
+}
+
+// detectRequestIntent 检测消息是否包含求片意图关键词
+// 必须同时满足：群组配置了 TMDB 和求片功能、消息 @ 了 Bot、消息包含求片关键词
+func (ch *ChatHandler) detectRequestIntent(msg *tgbotapi.Message) bool {
+	// 仅处理群聊消息
+	if msg.Chat.Type == "private" {
+		return false
+	}
+
+	// 检查群组是否配置了 TMDB 和求片功能
+	group := ch.appConfig.GetGroupConfig(msg.Chat.ID)
+	if group == nil || group.TMDBAPIKey == "" || !group.RequestEnabled {
+		return false
+	}
+
+	// 提取消息文本
+	text := msg.Text
+	if text == "" {
+		text = msg.Caption
+	}
+	if text == "" {
+		return false
+	}
+
+	// 检查消息是否 @ 了 Bot
+	mentionedBot := false
+	allEntities := msg.Entities
+	entitySource := msg.Text
+	if len(allEntities) == 0 && msg.CaptionEntities != nil {
+		allEntities = msg.CaptionEntities
+		entitySource = msg.Caption
+	}
+	if allEntities != nil && entitySource != "" {
+		for _, entity := range allEntities {
+			if entity.Type == "mention" {
+				mention := entitySource[entity.Offset : entity.Offset+entity.Length]
+				if strings.EqualFold(mention, "@"+ch.bot.Self.UserName) {
+					mentionedBot = true
+					break
+				}
+			}
+		}
+	}
+	if !mentionedBot {
+		return false
+	}
+
+	// 检查是否包含求片意图关键词
+	requestKeywords := []string{"求片", "想看", "能不能加", "有没有", "可以加"}
+	for _, kw := range requestKeywords {
+		if strings.Contains(text, kw) {
+			return true
 		}
 	}
 
@@ -823,6 +931,33 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 	}
 
+	// 当群组配置了 TMDB API Key 时，注入 search_tmdb 工具定义
+	if ch.tmdbMap[chatID] != nil {
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "search_tmdb",
+				Description: "搜索 TMDB（The Movie Database）获取电影或电视剧的详细信息，包括评分、简介、上映日期等。当用户询问影视相关问题时使用此工具。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{
+							"type":        "string",
+							"description": "搜索关键词（电影或电视剧名称）",
+						},
+						"media_type": map[string]any{
+							"type":        "string",
+							"enum":        []string{"movie", "tv", ""},
+							"description": "媒体类型：movie（电影）、tv（电视剧），留空则搜索全部",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		})
+		log.Printf("[AI] 启用 TMDB search_tmdb 工具...")
+	}
+
 	// 循环处理 AI 的响应（支持多次连续工具调用）
 	var reply string
 	for i := 0; i < 5; i++ { // 最多允许连续调用5次工具
@@ -861,6 +996,41 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 						ToolCallID: tc.ID,
 						Name:       tc.Function.Name,
 						Content:    MessageContent{Text: searchResult},
+					})
+				}
+
+				// 处理 TMDB 影视搜索工具调用
+				if tc.Function.Name == "search_tmdb" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 search_tmdb 参数失败: %v", err)
+						continue
+					}
+
+					query, _ := args["query"].(string)
+					mediaType, _ := args["media_type"].(string)
+
+					log.Printf("[AI] 【触发 TMDB 搜索】关键词: %s, 类型: %s", query, mediaType)
+
+					var tmdbResult string
+					if tmdbClient := ch.tmdbMap[chatID]; tmdbClient != nil {
+						results, err := tmdbClient.SearchMulti(query, mediaType)
+						if err != nil {
+							log.Printf("[AI] TMDB 搜索失败: %v", err)
+							tmdbResult = fmt.Sprintf("TMDB 搜索失败: %v", err)
+						} else {
+							tmdbResult = FormatTMDBResultsForAI(results)
+						}
+					} else {
+						tmdbResult = "TMDB 功能未配置，无法搜索影视信息。"
+					}
+
+					// 将工具执行的结果作为 role="tool" 加回 messages
+					messages = append(messages, ChatMessage{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Name:       tc.Function.Name,
+						Content:    MessageContent{Text: tmdbResult},
 					})
 				}
 			}

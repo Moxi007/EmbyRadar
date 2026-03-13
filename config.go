@@ -24,30 +24,32 @@ type GlobalConfig struct {
 	AITemperature    float64 `json:"ai_temperature"`
 	AIMaxContext     int     `json:"ai_max_context"`
 	BotAdmins        []int64 `json:"bot_admins"`
+	DBPath           string  `json:"db_path"` // SQLite 数据库路径，默认 config/embyradar.db
 }
 
 // GroupConfig 群组级独立配置，每个 Telegram 群组一份
 type GroupConfig struct {
-	TelegramChatID          int64            `json:"telegram_chat_id"`
-	EmbyURL                 string           `json:"emby_url"`
-	EmbyAPIKey              string           `json:"emby_api_key"`
-	EmbyBossAPIUrl          string           `json:"embyboss_api_url"`
-	EmbyBossAPIToken        string           `json:"embyboss_api_token"`
-	EmbyBossCurrencyName    string           `json:"embyboss_currency_name"`
-	ServerName              string           `json:"server_name"`
-	UpdateInterval          int              `json:"update_interval"`
-	WebhookPort             int              `json:"webhook_port"`
-	WelcomeStickerID        string           `json:"welcome_sticker_id"`
-	WelcomeEmbyPrompt       string           `json:"welcome_emby_prompt"`
-	WelcomeCodePrompt       string           `json:"welcome_code_prompt"`
-	AIEnabled               bool             `json:"ai_enabled"`
-	AISearchEnabled         bool             `json:"ai_search_enabled"`
-	AISystemPrompt          string           `json:"ai_system_prompt"`
-	AITriggerKeywords       []string         `json:"ai_trigger_keywords"`
-	AIRoles                 map[int64]string `json:"ai_roles"`
-	AIKnowledgeDir          string           `json:"ai_knowledge_dir"`
-	AIEmbyStatsFormat       string           `json:"ai_emby_stats_format"`
-	AIGoogleSearchGrounding bool             `json:"ai_google_search_grounding"`
+	TelegramChatID       int64            `json:"telegram_chat_id"`
+	EmbyURL              string           `json:"emby_url"`
+	EmbyAPIKey           string           `json:"emby_api_key"`
+	EmbyBossAPIUrl       string           `json:"embyboss_api_url"`
+	EmbyBossAPIToken     string           `json:"embyboss_api_token"`
+	EmbyBossCurrencyName string           `json:"embyboss_currency_name"`
+	ServerName           string           `json:"server_name"`
+	UpdateInterval       int              `json:"update_interval"`
+	WebhookPort          int              `json:"webhook_port"`
+	WelcomeStickerID     string           `json:"welcome_sticker_id"`
+	WelcomeEmbyPrompt    string           `json:"welcome_emby_prompt"`
+	WelcomeCodePrompt    string           `json:"welcome_code_prompt"`
+	AIEnabled            bool             `json:"ai_enabled"`
+	AISearchEnabled      bool             `json:"ai_search_enabled"`
+	AISystemPrompt       string           `json:"ai_system_prompt"`
+	AITriggerKeywords    []string         `json:"ai_trigger_keywords"`
+	AIRoles              map[int64]string `json:"ai_roles"`
+	AIKnowledgeDir       string           `json:"ai_knowledge_dir"`
+	AIEmbyStatsFormat    string           `json:"ai_emby_stats_format"`
+	TMDBAPIKey           string           `json:"tmdb_api_key"`    // TMDB API 密钥，为空时禁用 TMDB 功能
+	RequestEnabled       bool             `json:"request_enabled"` // 求片功能开关，默认 false
 }
 
 // GetGroupConfig 根据 chatID 查找群组配置，O(1) map 查找
@@ -77,6 +79,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 		AITemperature    float64         `json:"ai_temperature"`
 		AIMaxContext     int             `json:"ai_max_context"`
 		BotAdmins        []int64         `json:"bot_admins"`
+		DBPath           string          `json:"db_path"`
 		Groups           json.RawMessage `json:"groups"`
 	}
 
@@ -199,6 +202,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 			AITemperature:    raw.AITemperature,
 			AIMaxContext:     raw.AIMaxContext,
 			BotAdmins:        raw.BotAdmins,
+			DBPath:           raw.DBPath,
 		},
 		Groups: groups,
 	}
