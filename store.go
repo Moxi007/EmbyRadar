@@ -55,10 +55,11 @@ CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
 CREATE INDEX IF NOT EXISTS idx_requests_dedup ON requests(chat_id, user_id, tmdb_id, status);
 
 CREATE TABLE IF NOT EXISTS admin_messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id INTEGER NOT NULL,
-    admin_id   INTEGER NOT NULL,
-    message_id INTEGER NOT NULL,
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id   INTEGER NOT NULL,
+    admin_id     INTEGER NOT NULL,
+    message_id   INTEGER NOT NULL,
+    message_text TEXT    NOT NULL DEFAULT '',
     FOREIGN KEY (request_id) REFERENCES requests(id)
 );
 
@@ -277,15 +278,16 @@ func boolToInt(b bool) int {
 
 // AdminMessage 管理员消息记录，用于审批后同步更新所有管理员的消息
 type AdminMessage struct {
-	AdminID   int64 // 管理员 Telegram ID
-	MessageID int   // 消息 ID
+	AdminID     int64  // 管理员 Telegram ID
+	MessageID   int    // 消息 ID
+	MessageText string // 原始 Markdown 消息文本
 }
 
-// SaveAdminMessage 保存管理员收到的求片消息 ID
-func (s *RequestStore) SaveAdminMessage(requestID int64, adminID int64, messageID int) error {
+// SaveAdminMessage 保存管理员收到的求片消息 ID 和原始文本
+func (s *RequestStore) SaveAdminMessage(requestID int64, adminID int64, messageID int, messageText string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO admin_messages (request_id, admin_id, message_id) VALUES (?, ?, ?)`,
-		requestID, adminID, messageID,
+		`INSERT INTO admin_messages (request_id, admin_id, message_id, message_text) VALUES (?, ?, ?, ?)`,
+		requestID, adminID, messageID, messageText,
 	)
 	if err != nil {
 		return fmt.Errorf("保存管理员消息记录失败: %w", err)
@@ -296,7 +298,7 @@ func (s *RequestStore) SaveAdminMessage(requestID int64, adminID int64, messageI
 // GetAdminMessages 查询指定求片记录对应的所有管理员消息
 func (s *RequestStore) GetAdminMessages(requestID int64) ([]AdminMessage, error) {
 	rows, err := s.db.Query(
-		`SELECT admin_id, message_id FROM admin_messages WHERE request_id = ?`,
+		`SELECT admin_id, message_id, message_text FROM admin_messages WHERE request_id = ?`,
 		requestID,
 	)
 	if err != nil {
@@ -307,7 +309,7 @@ func (s *RequestStore) GetAdminMessages(requestID int64) ([]AdminMessage, error)
 	var msgs []AdminMessage
 	for rows.Next() {
 		var m AdminMessage
-		if err := rows.Scan(&m.AdminID, &m.MessageID); err != nil {
+		if err := rows.Scan(&m.AdminID, &m.MessageID, &m.MessageText); err != nil {
 			return nil, fmt.Errorf("扫描管理员消息失败: %w", err)
 		}
 		msgs = append(msgs, m)

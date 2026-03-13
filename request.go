@@ -605,9 +605,9 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 			log.Printf("[求片] 向管理员 %d 转发求片请求失败: %v", adminID, err)
 		} else {
 			forwardSuccess++
-			// 记录管理员消息 ID，用于审批后同步更新所有管理员的消息
+			// 记录管理员消息 ID 和原始 Markdown 文本，用于审批后同步更新所有管理员的消息
 			if rh.store != nil && record != nil {
-				if err := rh.store.SaveAdminMessage(record.ID, adminID, sentMsg.MessageID); err != nil {
+				if err := rh.store.SaveAdminMessage(record.ID, adminID, sentMsg.MessageID, adminMsg); err != nil {
 					log.Printf("[求片] 保存管理员 %d 消息记录失败: %v", adminID, err)
 				}
 			}
@@ -874,16 +874,10 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 
 	if len(adminMsgs) > 0 {
 		for _, am := range adminMsgs {
-			var newText string
-			if query.Message != nil && am.AdminID == query.Message.Chat.ID && am.MessageID == query.Message.MessageID {
-				originalText := query.Message.Text
-				newText = strings.Replace(originalText, "🎬 新求片请求", statusLabel, 1)
-				if newText == originalText {
-					newText = statusLabel + "\n" + originalText
-				}
-			} else {
-				// 其他管理员的消息无法获取原文，直接用状态标记
-				newText = statusLabel
+			// 使用数据库中存储的原始 Markdown 文本进行替换，保留所有链接格式
+			newText := strings.Replace(am.MessageText, "🎬 新求片请求", statusLabel, 1)
+			if newText == am.MessageText {
+				newText = statusLabel + "\n" + am.MessageText
 			}
 
 			editMsg := tgbotapi.NewEditMessageText(am.AdminID, am.MessageID, newText)
