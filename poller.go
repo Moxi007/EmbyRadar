@@ -106,7 +106,7 @@ func (p *Poller) checkAndNotify(record *RequestRecord) error {
 	}
 
 	// 资源已入库，发送通知消息到原群聊
-	notifyText := FormatFulfilledNotify(record.UserID, record.Title)
+	notifyText := FormatFulfilledNotify(record.UserID, record.Title, record.TMDBID, record.MediaType)
 	notifyMsg := tgbotapi.NewMessage(record.ChatID, notifyText)
 	notifyMsg.ParseMode = "Markdown"
 	if _, err := p.bot.Send(notifyMsg); err != nil {
@@ -123,8 +123,14 @@ func (p *Poller) checkAndNotify(record *RequestRecord) error {
 	return nil
 }
 
-// FormatFulfilledNotify 生成入库通知消息，包含用户 Markdown 链接和影视标题
-func FormatFulfilledNotify(userID int64, title string) string {
+// FormatFulfilledNotify 生成入库通知消息，片名链接到 TMDB 页面
+func FormatFulfilledNotify(userID int64, title string, tmdbID int, mediaType string) string {
 	userLink := fmt.Sprintf("[用户](tg://user?id=%d)", userID)
-	return fmt.Sprintf("🎉 %s 你求的「%s」已入库，快去看吧", userLink, title)
+	mediaPath := "movie"
+	if mediaType == "tv" {
+		mediaPath = "tv"
+	}
+	tmdbURL := fmt.Sprintf("https://www.themoviedb.org/%s/%d", mediaPath, tmdbID)
+	titleLink := fmt.Sprintf("[%s](%s)", cleanMarkdownName(title), tmdbURL)
+	return fmt.Sprintf("🎉 %s 你求的%s已入库，快去看吧", userLink, titleLink)
 }
