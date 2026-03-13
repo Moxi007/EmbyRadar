@@ -23,6 +23,72 @@ type ToolCall struct {
 	Function FunctionCall `json:"function"`
 }
 
+// ImageURL 表示 Base64 内联图片的 URL 结构
+type ImageURL struct {
+	URL string `json:"url"` // 格式: "data:{mime};base64,{data}"
+}
+
+// ContentPart 表示 OpenAI Vision 格式中 content 数组的单个元素
+type ContentPart struct {
+	Type     string    `json:"type"`                // "text" 或 "image_url"
+	Text     string    `json:"text,omitempty"`      // type="text" 时的文本内容
+	ImageURL *ImageURL `json:"image_url,omitempty"` // type="image_url" 时的图片数据
+}
+
+// MessageContent 多态消息内容，支持纯文本和多模态两种模式。
+// Parts 为空时序列化为 JSON 纯字符串，非空时序列化为 OpenAI Vision 格式的 content 数组。
+type MessageContent struct {
+	Text  string        // 纯文本内容
+	Parts []ContentPart // 多模态内容数组（非空时优先使用）
+}
+
+// MarshalJSON 实现 json.Marshaler 接口。
+// Parts 非空时序列化为 OpenAI Vision 格式的 content 数组，否则序列化为纯 JSON 字符串。
+func (mc MessageContent) MarshalJSON() ([]byte, error) {
+	if len(mc.Parts) > 0 {
+		return json.Marshal(mc.Parts)
+	}
+	return json.Marshal(mc.Text)
+}
+
+// UnmarshalJSON 实现 json.Unmarshaler 接口。
+// 根据 JSON token 类型自动选择解析模式：字符串 → 纯文本，数组 → 多模态内容。
+func (mc *MessageContent) UnmarshalJSON(data []byte) error {
+	// 尝试判断 JSON 值的类型：如果以 '"' 开头则为字符串，以 '[' 开头则为数组
+	if len(data) == 0 {
+		return nil
+	}
+	switch data[0] {
+	case '"':
+		// 纯文本模式
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		mc.Text = s
+		mc.Parts = nil
+		return nil
+	case '[':
+		// 多模态内容数组模式
+		var parts []ContentPart
+		if err := json.Unmarshal(data, &parts); err != nil {
+			return err
+		}
+		mc.Parts = parts
+		mc.Text = ""
+		return nil
+	default:
+		// 兜底：尝试按字符串解析
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return fmt.Errorf("无法解析 MessageContent: %s", string(data))
+		}
+		mc.Text = s
+		mc.Parts = nil
+		return nil
+	}
+}
+
 // Tool 表示一个可以被 AI 调用的工具。为了兼容 Google Search Grounding，部分字段可为空且支持任意扩展
 type Tool struct {
 	Type     string        `json:"type"`
@@ -41,11 +107,11 @@ type ToolFunction struct {
 
 // ChatMessage 表示一条对话消息（OpenAI 格式）
 type ChatMessage struct {
-	Role       string     `json:"role"`                   // "system" | "user" | "assistant" | "tool"
-	Content    string     `json:"content"`                // 消息内容
-	Name       string     `json:"name,omitempty"`         // 当 role 为 tool 时，传入 function name
-	ToolCallID string     `json:"tool_call_id,omitempty"` // 当 role 为 tool 时，传入 tool_call_id
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // 当 role 为 assistant 时，如果调用了工具则有此字段
+	Role       string         `json:"role"`                   // "system" | "user" | "assistant" | "tool"
+	Content    MessageContent `json:"content"`                // 消息内容（支持纯文本和多模态）
+	Name       string         `json:"name,omitempty"`         // 当 role 为 tool 时，传入 function name
+	ToolCallID string         `json:"tool_call_id,omitempty"` // 当 role 为 tool 时，传入 tool_call_id
+	ToolCalls  []ToolCall     `json:"tool_calls,omitempty"`   // 当 role 为 assistant 时，如果调用了工具则有此字段
 }
 
 // ChatCompletionRequest 表示 OpenAI Chat Completion 请求体

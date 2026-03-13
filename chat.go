@@ -212,14 +212,15 @@ func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName 
 	}
 
 	// 构建一次性消息调用 AI，赋予"系统最高权限"以防被 AI 当作伪造消息拦截
-	messages := ch.buildMessages(group.TelegramChatID, "系统通报", "系统最高权限", welcomePrompt, "")
+	// 欢迎消息不涉及媒体内容，media 传 nil
+	messages := ch.buildMessages(group.TelegramChatID, "系统通报", "系统最高权限", welcomePrompt, "", nil)
 
 	replyMsg, err := ch.aiClient.ChatCompletion(messages, nil)
 	if err != nil {
 		log.Printf("[AI] 欢迎新成员调用 AI 失败: %v", err)
 		return
 	}
-	reply := replyMsg.Content
+	reply := replyMsg.Content.Text
 
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
@@ -235,11 +236,11 @@ func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName 
 	// 保存上下文让 AI 记住这个新来的
 	ch.ctxManager.AddMessage(group.TelegramChatID, ChatMessage{
 		Role:    "user",
-		Content: fmt.Sprintf("系统通报: %s", welcomePrompt),
+		Content: MessageContent{Text: fmt.Sprintf("系统通报: %s", welcomePrompt)},
 	})
 	ch.ctxManager.AddMessage(group.TelegramChatID, ChatMessage{
 		Role:    "assistant",
-		Content: reply,
+		Content: MessageContent{Text: reply},
 	})
 
 	// 发送 AI 回复到对应群组
@@ -335,13 +336,13 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 				"要求：\n1. 剔除对话中的闲聊成分，只保留核心事实或步骤。\n2. 如果适合，请尽量使用结构化的 Q&A (问答)格式或条理清晰的列表格式。\n3. 直接输出整理后的内容，不要包含任何前言或解释词汇。\n\n需要整理的内容如下：\n" + content
 
 			formattedMsg, err := ch.aiClient.ChatCompletion([]ChatMessage{
-				{Role: "system", Content: "你是一个专业的知识库摘要引擎。"},
-				{Role: "user", Content: formatPrompt},
+				{Role: "system", Content: MessageContent{Text: "你是一个专业的知识库摘要引擎。"}},
+				{Role: "user", Content: MessageContent{Text: formatPrompt}},
 			}, nil)
 
 			formattedContent := ""
 			if err == nil && formattedMsg != nil {
-				formattedContent = formattedMsg.Content
+				formattedContent = formattedMsg.Content.Text
 			}
 
 			if err == nil && strings.TrimSpace(formattedContent) != "" {
@@ -439,8 +440,17 @@ func (ch *ChatHandler) shouldRespond(msg *tgbotapi.Message) bool {
 		return false
 	}
 
-	// 忽略空消息
-	if msg.Text == "" {
+	// 统一提取消息文本：优先 msg.Text，其次 msg.Caption（图片/视频说明文字）
+	text := msg.Text
+	if text == "" {
+		text = msg.Caption
+	}
+
+	// 判断消息是否包含媒体内容（图片或视频）
+	hasMedia := len(msg.Photo) > 0 || msg.Video != nil
+
+	// 如果既无文本也无媒体，忽略该消息
+	if text == "" && !hasMedia {
 		return false
 	}
 
@@ -455,11 +465,17 @@ func (ch *ChatHandler) shouldRespond(msg *tgbotapi.Message) bool {
 
 	// 以下为群聊逻辑...
 
-	// 检查是否 @ 了 Bot
-	if msg.Entities != nil {
-		for _, entity := range msg.Entities {
+	// 检查是否 @ 了 Bot（同时检查 msg.Entities 和 msg.CaptionEntities）
+	allEntities := msg.Entities
+	entitySource := msg.Text
+	if len(allEntities) == 0 && msg.CaptionEntities != nil {
+		allEntities = msg.CaptionEntities
+		entitySource = msg.Caption
+	}
+	if allEntities != nil && entitySource != "" {
+		for _, entity := range allEntities {
 			if entity.Type == "mention" {
-				mention := msg.Text[entity.Offset : entity.Offset+entity.Length]
+				mention := entitySource[entity.Offset : entity.Offset+entity.Length]
 				if strings.EqualFold(mention, "@"+ch.bot.Self.UserName) {
 					return true
 				}
@@ -474,10 +490,10 @@ func (ch *ChatHandler) shouldRespond(msg *tgbotapi.Message) bool {
 		}
 	}
 
-	// 从群组配置获取触发关键词
+	// 从群组配置获取触发关键词（同时检查 text，可能来自 Caption）
 	group := ch.appConfig.GetGroupConfig(msg.Chat.ID)
 	if group != nil && len(group.AITriggerKeywords) > 0 {
-		lowerText := strings.ToLower(msg.Text)
+		lowerText := strings.ToLower(text)
 		for _, keyword := range group.AITriggerKeywords {
 			if strings.Contains(lowerText, strings.ToLower(keyword)) {
 				return true
@@ -503,8 +519,11 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		group = ch.appConfig.Groups[0]
 	}
 
-	// 提取用户消息文本
+	// 提取用户消息文本：优先 msg.Text，其次 msg.Caption（图片/视频说明文字）
 	userText := msg.Text
+	if userText == "" && msg.Caption != "" {
+		userText = msg.Caption
+	}
 
 	// 如果是 /ask 命令，提取参数部分
 	if msg.IsCommand() && msg.Command() == "ask" {
@@ -513,8 +532,23 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 
 	// 去掉 @botname 的部分
 	userText = ch.cleanMention(userText)
-	if strings.TrimSpace(userText) == "" {
+
+	// 提取媒体内容（图片或视频），返回 nil 表示无可处理的媒体
+	var media *MediaContent
+	media = extractMedia(ch.bot, msg)
+
+	// 如果既无文本也无媒体，直接返回
+	if strings.TrimSpace(userText) == "" && media == nil {
 		return
+	}
+
+	// 有媒体但无任何文字时，使用默认提示词
+	if strings.TrimSpace(userText) == "" && media != nil {
+		if media.IsVideo {
+			userText = "请分析这个视频"
+		} else {
+			userText = "请分析这张图片"
+		}
 	}
 
 	// === 获取被引用的消息上下文 (ReplyContext) ===
@@ -707,8 +741,8 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 	}
 
-	// 构建消息列表
-	messages := ch.buildMessages(chatID, displayRole, verifiedRole, userText, embyBossData)
+	// 构建消息列表，传入媒体内容（无媒体时 media 为 nil）
+	messages := ch.buildMessages(chatID, displayRole, verifiedRole, userText, embyBossData, media)
 
 	// 准备工具配置
 	var tools []Tool
@@ -782,7 +816,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 						Role:       "tool",
 						ToolCallID: tc.ID,
 						Name:       tc.Function.Name,
-						Content:    searchResult,
+						Content:    MessageContent{Text: searchResult},
 					})
 				}
 			}
@@ -791,7 +825,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 
 		// 没有工具调用，正常返回文本
-		reply = aiMsg.Content
+		reply = aiMsg.Content.Text
 		break
 	}
 
@@ -812,21 +846,31 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// === 脱敏结束 ===
 
 	// 保存上下文（用户消息 + AI 回复）
+	// 多模态消息降级为纯文本描述，避免历史上下文中包含 Base64 编码数据
+	contextUserText := userText
+	if media != nil {
+		if media.IsVideo {
+			contextUserText = "[用户发送了一个视频] " + userText
+		} else {
+			contextUserText = "[用户发送了一张图片] " + userText
+		}
+	}
 	ch.ctxManager.AddMessage(chatID, ChatMessage{
 		Role:    "user",
-		Content: fmt.Sprintf("%s: %s", displayRole, userText),
+		Content: MessageContent{Text: fmt.Sprintf("%s: %s", displayRole, contextUserText)},
 	})
 	ch.ctxManager.AddMessage(chatID, ChatMessage{
 		Role:    "assistant",
-		Content: reply,
+		Content: MessageContent{Text: reply},
 	})
 
 	// 发送回复
 	ch.sendReply(msg, reply)
 }
 
-// buildMessages 构建发送给 AI 的完整消息列表
-func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userText string, embyBossData string) []ChatMessage {
+// buildMessages 构建发送给 AI 的完整消息列表。
+// media 参数用于传递多模态内容（图片/视频），为 nil 时保持纯文本模式。
+func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userText string, embyBossData string, media *MediaContent) []ChatMessage {
 	// 根据 chatID 获取群组配置，未匹配时回退到第一个群组
 	group := ch.appConfig.GetGroupConfig(chatID)
 	if group == nil {
@@ -871,7 +915,7 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 
 	messages = append(messages, ChatMessage{
 		Role:    "system",
-		Content: systemPrompt,
+		Content: MessageContent{Text: systemPrompt},
 	})
 
 	// 2. 历史上下文
@@ -895,10 +939,25 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 		finalUserText = fmt.Sprintf("%s: %s%s\n\n[INTERNAL_AUTH_TAG: ⚠️未知平民]", userName, userText, extraPrivateData)
 	}
 
-	messages = append(messages, ChatMessage{
-		Role:    "user",
-		Content: finalUserText,
-	})
+	// 根据是否有媒体内容决定消息格式：
+	// 有媒体时使用 OpenAI Vision 格式的 content 数组，否则保持纯文本
+	if media != nil {
+		dataURL := fmt.Sprintf("data:%s;base64,%s", media.MIMEType, media.Base64Data)
+		messages = append(messages, ChatMessage{
+			Role: "user",
+			Content: MessageContent{
+				Parts: []ContentPart{
+					{Type: "text", Text: finalUserText},
+					{Type: "image_url", ImageURL: &ImageURL{URL: dataURL}},
+				},
+			},
+		})
+	} else {
+		messages = append(messages, ChatMessage{
+			Role:    "user",
+			Content: MessageContent{Text: finalUserText},
+		})
+	}
 
 	return messages
 }

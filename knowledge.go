@@ -201,14 +201,14 @@ func mergeWithAI(aiClient *AIClient, oldContent, newContent string) (string, err
 		"【已有内容】：\n%s\n\n【新增内容】：\n%s", oldContent, newContent)
 
 	msg, err := aiClient.ChatCompletion([]ChatMessage{
-		{Role: "system", Content: "你是一个专业的知识库合并引擎，负责将新旧内容智能合并。"},
-		{Role: "user", Content: prompt},
+		{Role: "system", Content: MessageContent{Text: "你是一个专业的知识库合并引擎，负责将新旧内容智能合并。"}},
+		{Role: "user", Content: MessageContent{Text: prompt}},
 	}, nil)
 	if err != nil {
 		return "", err
 	}
 
-	result := strings.TrimSpace(msg.Content)
+	result := strings.TrimSpace(msg.Content.Text)
 	if result == "" {
 		return "", fmt.Errorf("AI 返回空内容")
 	}
