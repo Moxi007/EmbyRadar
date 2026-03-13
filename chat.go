@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -110,12 +111,14 @@ func (ch *ChatHandler) StartListening() {
 			continue
 		}
 
-		// 处理管理员审批回调和用户选择 TMDB 结果回调
+		// 处理管理员审批回调、用户选择 TMDB 结果回调、AI 求片确认回调
 		if update.CallbackQuery != nil {
 			if strings.HasPrefix(update.CallbackQuery.Data, "request:") {
 				ch.requestHandler.HandleCallbackQuery(ch, update.CallbackQuery)
 			} else if strings.HasPrefix(update.CallbackQuery.Data, "reqsel:") {
 				go ch.requestHandler.HandleSelectCallback(ch, update.CallbackQuery)
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "reqai:") {
+				go ch.requestHandler.HandleAIConfirmCallback(ch, update.CallbackQuery)
 			}
 			continue
 		}
@@ -1076,8 +1079,40 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		Content: MessageContent{Text: reply},
 	})
 
-	// 发送回复
-	ch.sendReply(msg, reply)
+	// 发送回复：检测 AI 回复中是否包含求片确认标记
+	requestConfirmRe := regexp.MustCompile(`\[REQUEST_CONFIRM:(.+?)\]`)
+	if matches := requestConfirmRe.FindStringSubmatch(reply); len(matches) == 2 {
+		movieName := strings.TrimSpace(matches[1])
+		// 从回复中移除标记
+		reply = strings.TrimSpace(requestConfirmRe.ReplaceAllString(reply, ""))
+
+		// 构建确认求片的 Inline Keyboard 按钮
+		// 回调数据格式：reqai:{chatID}:{userID}:{movieName}
+		// movieName 可能较长，Telegram 回调数据限制 64 字节，需要截断
+		callbackMovieName := movieName
+		if len(callbackMovieName) > 30 {
+			callbackMovieName = string([]rune(callbackMovieName)[:30])
+		}
+		cbData := fmt.Sprintf("%s:%d:%d:%s", aiConfirmCallbackPrefix, chatID, senderID, callbackMovieName)
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🎬 确认求片", cbData),
+			),
+		)
+
+		replyMsg := tgbotapi.NewMessage(chatID, reply)
+		replyMsg.ReplyToMessageID = msg.MessageID
+		replyMsg.ParseMode = "Markdown"
+		replyMsg.ReplyMarkup = keyboard
+		if _, err := ch.bot.Send(replyMsg); err != nil {
+			log.Printf("[AI] 发送求片确认消息失败: %v，降级为纯文本", err)
+			// Markdown 解析失败时降级为纯文本
+			replyMsg.ParseMode = ""
+			ch.bot.Send(replyMsg)
+		}
+	} else {
+		ch.sendReply(msg, reply)
+	}
 }
 
 // buildMessages 构建发送给 AI 的完整消息列表。
@@ -1131,6 +1166,18 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 				systemPrompt += fmt.Sprintf(group.AIEmbyStatsFormat, users, sessions)
 			}
 		}
+	}
+
+	// 当群组启用了求片功能时，在 system prompt 中注入求片引导指令，
+	// AI 识别到求片意图后返回特殊标记，由系统生成确认按钮
+	if group.RequestEnabled && ch.appConfig.Global.TMDBAPIKey != "" {
+		systemPrompt += "\n\n[系统硬约束 - 求片功能]：当用户表达想看某部影视、求片、找片、想要某个资源等意图时，" +
+			"你必须在回复末尾附加一个特殊标记：[REQUEST_CONFIRM:影视名称]。" +
+			"例如用户说「帮我找一下流浪地球」，你可以回复「好的，我来帮你搜索《流浪地球》[REQUEST_CONFIRM:流浪地球]」。" +
+			"标记中的影视名称应该是你理解的最准确的片名。" +
+			"注意：你不能声称已经帮用户提交了求片请求，你只是在帮用户发起搜索确认流程。" +
+			"如果用户只是在讨论或询问某部影视的信息（评分、剧情等），不要附加此标记。" +
+			"只有当用户明确表达了想要求片、想看、能不能加等获取资源的意图时才附加。"
 	}
 
 	messages = append(messages, ChatMessage{

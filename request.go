@@ -151,6 +151,9 @@ const callbackPrefix = "request"
 // selectCallbackPrefix 用户选择 TMDB 搜索结果的回调前缀
 const selectCallbackPrefix = "reqsel"
 
+// aiConfirmCallbackPrefix AI 识别求片意图后的确认按钮回调前缀
+const aiConfirmCallbackPrefix = "reqai"
+
 // SelectCallbackData 用户选择 TMDB 搜索结果的回调数据
 type SelectCallbackData struct {
 	ChatID int64 // 群聊 ID
@@ -614,6 +617,165 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	ch.bot.Send(reply)
 
 	rh.deleteSession(cbData.ChatID, cbData.UserID)
+}
+
+// HandleAIConfirmCallback 处理用户点击 AI 回复中"确认求片"按钮的回调
+// 流程：解析回调数据 → 触发 TMDB 搜索 → 展示搜索结果按钮供用户选择
+func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbotapi.CallbackQuery) {
+	// 解析回调数据，格式：reqai:{chatID}:{userID}:{movieName}
+	parts := strings.SplitN(query.Data, ":", 4)
+	if len(parts) != 4 {
+		callback := tgbotapi.NewCallback(query.ID, "数据解析失败")
+		ch.bot.Request(callback)
+		return
+	}
+
+	chatID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		callback := tgbotapi.NewCallback(query.ID, "数据解析失败")
+		ch.bot.Request(callback)
+		return
+	}
+	userID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		callback := tgbotapi.NewCallback(query.ID, "数据解析失败")
+		ch.bot.Request(callback)
+		return
+	}
+	movieName := parts[3]
+
+	// 验证回调来源：只有发起者本人才能确认
+	if query.From.ID != userID {
+		callback := tgbotapi.NewCallback(query.ID, "只有发起者才能确认求片")
+		ch.bot.Request(callback)
+		return
+	}
+
+	// 回复 CallbackQuery
+	callback := tgbotapi.NewCallback(query.ID, "正在搜索...")
+	ch.bot.Request(callback)
+
+	// 更新原消息：移除确认按钮，标记已确认
+	if query.Message != nil {
+		editText := query.Message.Text + "\n\n✅ 已确认，正在搜索..."
+		editMsg := tgbotapi.NewEditMessageText(chatID, query.Message.MessageID, editText)
+		emptyMarkup := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}}
+		editMsg.ReplyMarkup = &emptyMarkup
+		ch.bot.Request(editMsg)
+	}
+
+	// 获取 TMDB 客户端
+	tmdbClient := ch.tmdbMap[chatID]
+	if tmdbClient == nil {
+		reply := tgbotapi.NewMessage(chatID, "⚠️ 当前群组未配置 TMDB，无法搜索影视信息")
+		ch.bot.Send(reply)
+		return
+	}
+
+	// 调用 AI 分析影视名称和类型
+	intentMessages := []ChatMessage{
+		{
+			Role: "system",
+			Content: MessageContent{Text: "你是一个影视信息提取助手。请从用户的文本中提取以下信息并以 JSON 格式返回：\n" +
+				"1. name: 影视作品名称\n" +
+				"2. type: 类型，\"movie\"（电影）或 \"tv\"（电视剧），无法判断时留空\n" +
+				"3. is_remaster: 是否有洗版意图（用户想要更高清版本），布尔值\n\n" +
+				"只返回 JSON，不要包含其他文字。示例：{\"name\":\"流浪地球2\",\"type\":\"movie\",\"is_remaster\":false}"},
+		},
+		{
+			Role:    "user",
+			Content: MessageContent{Text: movieName},
+		},
+	}
+
+	var mediaType string
+	var isRemaster bool
+
+	aiResp, err := ch.aiClient.ChatCompletion(intentMessages, nil)
+	if err != nil {
+		log.Printf("[求片] AI 意图分析失败: %v，使用原始片名搜索", err)
+	} else {
+		respText := strings.TrimSpace(aiResp.Content.Text)
+		respText = strings.TrimPrefix(respText, "```json")
+		respText = strings.TrimPrefix(respText, "```")
+		respText = strings.TrimSuffix(respText, "```")
+		respText = strings.TrimSpace(respText)
+
+		var intent aiIntentResult
+		if err := json.Unmarshal([]byte(respText), &intent); err == nil {
+			if intent.Name != "" {
+				movieName = intent.Name
+			}
+			mediaType = intent.Type
+			isRemaster = intent.IsRemaster
+		}
+	}
+
+	// 搜索 TMDB
+	results, err := tmdbClient.SearchMulti(movieName, mediaType)
+	if err != nil {
+		log.Printf("[求片] TMDB 搜索失败: %v", err)
+		reply := tgbotapi.NewMessage(chatID, "⚠️ 搜索影视信息时出错，请稍后再试")
+		ch.bot.Send(reply)
+		return
+	}
+
+	if len(results) == 0 {
+		reply := tgbotapi.NewMessage(chatID, "未找到相关影视，请尝试更精确的片名")
+		ch.bot.Send(reply)
+		return
+	}
+
+	// 构建候选列表和选择按钮
+	userName := query.From.FirstName
+	if query.From.LastName != "" {
+		userName += " " + query.From.LastName
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🔍 找到以下结果，请点击选择：\n\n")
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i, r := range results {
+		mediaIcon := "🎬"
+		if r.MediaType == "tv" {
+			mediaIcon = "📺"
+		}
+		year := r.GetYear()
+		title := r.GetDisplayTitle()
+		sb.WriteString(fmt.Sprintf("%s %d. %s（%s）\n", mediaIcon, i+1, title, year))
+
+		btnText := fmt.Sprintf("%d. %s（%s）", i+1, title, year)
+		if len([]rune(btnText)) > 40 {
+			btnText = string([]rune(btnText)[:37]) + "..."
+		}
+		selCbData := FormatSelectCallbackData(&SelectCallbackData{
+			ChatID: chatID,
+			UserID: userID,
+			Index:  i,
+		})
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(btnText, selCbData),
+		))
+	}
+
+	selectKeyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	selectMsg := tgbotapi.NewMessage(chatID, sb.String())
+	selectMsg.ReplyMarkup = selectKeyboard
+	ch.bot.Send(selectMsg)
+
+	// 创建会话，存储候选结果
+	rh.mu.Lock()
+	rh.sessions[sessionKey(chatID, userID)] = &RequestSession{
+		UserID:      userID,
+		UserName:    userName,
+		ChatID:      chatID,
+		TMDBResults: results,
+		IsRemaster:  isRemaster,
+		State:       StateWaitConfirm,
+		CreatedAt:   time.Now(),
+		ExpiresAt:   time.Now().Add(sessionTimeout),
+	}
+	rh.mu.Unlock()
 }
 
 // HandleCallbackQuery 处理管理员点击 Inline Keyboard 按钮的回调
