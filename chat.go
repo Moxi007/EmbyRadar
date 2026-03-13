@@ -17,6 +17,7 @@ type ChatHandler struct {
 	aiClient   *AIClient                 // 全局共享的 AI 客户端
 	ctxManager *ContextManager           // 全局共享，内部按 chatID 隔离
 	appConfig  *AppConfig                // 全局应用配置
+	globalKB   *KnowledgeBase            // 通用知识库，所有群组共享
 	kbMap      map[int64]*KnowledgeBase  // chatID → 独立知识库
 	embyMap    map[int64]*EmbyClient     // chatID → 独立 Emby 客户端
 	ebMap      map[int64]*EmbyBossClient // chatID → 独立 EmbyBoss 客户端
@@ -32,6 +33,12 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 		kbMap:      make(map[int64]*KnowledgeBase),
 		embyMap:    make(map[int64]*EmbyClient),
 		ebMap:      make(map[int64]*EmbyBossClient),
+	}
+
+	// 初始化通用知识库（所有群组共享，路径固定为 config/knowledge）
+	ch.globalKB = NewKnowledgeBase("config/knowledge")
+	if err := ch.globalKB.Load(); err != nil {
+		log.Printf("[知识库] 通用知识库加载失败: %v", err)
 	}
 
 	// 遍历所有群组配置，为每个群组初始化独立的客户端实例
@@ -262,7 +269,11 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 	case "reload_kb":
 		// 热重载知识库（仅管理员可用）
 		if ch.isAdmin(msg) {
+			// 私聊时操作通用知识库，群聊时操作群组知识库
 			kb := ch.kbMap[msg.Chat.ID]
+			if msg.Chat.Type == "private" {
+				kb = ch.globalKB
+			}
 			if kb == nil {
 				ch.sendReply(msg, "❌ 当前群组未配置知识库")
 				return true
@@ -279,6 +290,9 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 		// 列出所有知识库条目
 		if ch.isAdmin(msg) {
 			kb := ch.kbMap[msg.Chat.ID]
+			if msg.Chat.Type == "private" {
+				kb = ch.globalKB
+			}
 			if kb == nil {
 				ch.sendReply(msg, "❌ 当前群组未配置知识库")
 				return true
@@ -300,6 +314,9 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 		// 添加知识库条目
 		if ch.isAdmin(msg) {
 			kb := ch.kbMap[msg.Chat.ID]
+			if msg.Chat.Type == "private" {
+				kb = ch.globalKB
+			}
 			if kb == nil {
 				ch.sendReply(msg, "❌ 当前群组未配置知识库")
 				return true
@@ -387,6 +404,9 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 		// 删除知识库条目，用法: /kb_del <名称>
 		if ch.isAdmin(msg) {
 			kb := ch.kbMap[msg.Chat.ID]
+			if msg.Chat.Type == "private" {
+				kb = ch.globalKB
+			}
 			if kb == nil {
 				ch.sendReply(msg, "❌ 当前群组未配置知识库")
 				return true
@@ -534,8 +554,24 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	userText = ch.cleanMention(userText)
 
 	// 提取媒体内容（图片或视频），返回 nil 表示无可处理的媒体
+	// 优先从当前消息提取；若当前消息无媒体，则尝试从被引用的消息中提取
 	var media *MediaContent
-	media = extractMedia(ch.bot, msg)
+	var mediaErr string
+	media, mediaErr = extractMedia(ch.bot, msg)
+	if media == nil && msg.ReplyToMessage != nil {
+		media, mediaErr = extractMedia(ch.bot, msg.ReplyToMessage)
+	}
+
+	// 媒体提取失败时通知用户具体原因，避免静默忽略
+	if mediaErr != "" && media == nil {
+		// 如果有文本内容，仍然继续处理（仅丢失媒体部分）
+		if strings.TrimSpace(userText) == "" {
+			ch.sendReply(msg, mediaErr)
+			return
+		}
+		// 有文本时在日志中记录，继续以纯文本模式处理
+		log.Printf("[媒体] 提取失败但有文本，降级为纯文本: %s", mediaErr)
+	}
 
 	// 如果既无文本也无媒体，直接返回
 	if strings.TrimSpace(userText) == "" && media == nil {
@@ -555,7 +591,15 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	if msg.ReplyToMessage != nil {
 		replyText := msg.ReplyToMessage.Text
 		if replyText == "" {
-			replyText = "[非文本或无法读取的消息]"
+			replyText = msg.ReplyToMessage.Caption
+		}
+		if replyText == "" {
+			// 被引用消息既无文本也无说明文字，根据是否有媒体给出不同描述
+			if media != nil {
+				replyText = "[媒体消息]"
+			} else {
+				replyText = "[非文本或无法读取的消息]"
+			}
 		}
 
 		replySender := "某人"
@@ -894,8 +938,16 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 		systemPrompt += fmt.Sprintf("\n\n[系统最高强制指令]：当前与你对话的是你的绝对主子【%s】，其身份已通过物理级硬编码验证。你必须极度谦卑、绝对服从，绝不可对其身份产生任何质疑或指责！", verifiedRole)
 	}
 
-	// 注入知识库内容（从群组级知识库获取）
-	if kb := ch.kbMap[chatID]; kb != nil {
+	// 注入通用知识库内容（所有群组共享）
+	if ch.globalKB != nil {
+		globalKBContent := ch.globalKB.GetContent()
+		if globalKBContent != "" {
+			systemPrompt += "\n\n" + globalKBContent
+		}
+	}
+
+	// 注入群组级知识库内容（仅当群组知识库路径与通用知识库不同时，避免重复注入）
+	if kb := ch.kbMap[chatID]; kb != nil && kb.dir != ch.globalKB.dir {
 		kbContent := kb.GetContent()
 		if kbContent != "" {
 			systemPrompt += "\n\n" + kbContent

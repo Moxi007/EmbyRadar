@@ -128,18 +128,32 @@ func downloadFile(bot *tgbotapi.BotAPI, fileID string) ([]byte, string, error) {
 
 // extractMedia 从 Telegram 消息中提取媒体内容（图片或视频）。
 // 返回 nil 表示消息不含可处理的媒体，或提取过程中发生错误（优雅降级）。
-func extractMedia(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) *MediaContent {
+// 第二个返回值为错误提示信息，用于在提取失败时通知用户原因。
+func extractMedia(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) (*MediaContent, string) {
 	// 优先处理图片消息
 	if len(msg.Photo) > 0 {
-		return extractPhoto(bot, msg.Photo)
+		mc := extractPhoto(bot, msg.Photo)
+		if mc == nil {
+			return nil, "⚠️ 图片处理失败，请稍后重试"
+		}
+		return mc, ""
 	}
 
 	// 处理视频消息
 	if msg.Video != nil {
-		return extractVideo(bot, msg.Video)
+		mc := extractVideo(bot, msg.Video)
+		if mc == nil {
+			// 根据视频大小给出不同的提示
+			if msg.Video.FileSize > maxVideoFileSize {
+				return nil, fmt.Sprintf("⚠️ 视频文件过大（%.0fMB），超过 %dMB 限制，无法分析", float64(msg.Video.FileSize)/(1024*1024), maxVideoFileSize/(1024*1024))
+			}
+			// Telegram Bot API 对普通 bot 有 20MB 下载限制，实际视频可能超过此限制
+			return nil, "⚠️ 视频下载失败，可能是文件过大（Telegram 限制约 20MB）。请尝试发送较短的视频"
+		}
+		return mc, ""
 	}
 
-	return nil
+	return nil, ""
 }
 
 // extractPhoto 处理图片消息：选择最佳尺寸 → 下载 → 格式校验 → Base64 编码
