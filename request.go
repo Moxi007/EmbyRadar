@@ -650,6 +650,20 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		log.Printf("[求片] 货币扣除成功 (user=%d, cost=%d)", cbData.UserID, coinCost)
 	}
 
+	// 扣费成功后查询最新余额，用于消费信息展示
+	deductionInfo := ""
+	if coinCost > 0 && ebClient != nil {
+		balance := -1
+		userInfoAfter, err := ebClient.GetUserInfo(cbData.UserID)
+		if err != nil {
+			log.Printf("[求片] 扣费后余额查询失败 (user=%d): %v", cbData.UserID, err)
+		} else {
+			balance = userInfoAfter.Data.Iv
+		}
+		currencyName := ch.getCurrencyName(cbData.ChatID)
+		deductionInfo = FormatDeductionInfo(coinCost, balance, currencyName)
+	}
+
 	// 数据库去重和写入
 	var record *RequestRecord
 	if rh.store != nil {
@@ -725,6 +739,8 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	} else {
 		replyText = "请求已提交，等待管理员处理"
 	}
+	// 追加消费信息（扣费成功时展示消耗金额和余额）
+	replyText += deductionInfo
 	reply := tgbotapi.NewMessage(cbData.ChatID, replyText)
 	ch.bot.Send(reply)
 
@@ -963,13 +979,6 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		statusLabel = "🎬 求片请求（暂无资源 📭）"
 	}
 
-	// 在原求片群聊中发送通知消息
-	notifyMsg := tgbotapi.NewMessage(cbData.ChatID, notifyText)
-	notifyMsg.ParseMode = "Markdown"
-	if _, err := ch.bot.Send(notifyMsg); err != nil {
-		log.Printf("[求片] 在群聊 %d 中发送通知失败: %v", cbData.ChatID, err)
-	}
-
 	// 更新数据库中对应记录的状态
 	if dbRecord != nil {
 		var dbStatus string
@@ -984,16 +993,35 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		}
 	}
 
-	// 拒绝时退还货币
+	// 拒绝时退还货币，并在通知消息中附加退还信息
 	if dbRecord != nil && dbRecord.CoinCost > 0 && (cbData.Action == "reject" || cbData.Action == "reject_no_resource") {
 		ebClient := ch.ebMap[cbData.ChatID]
 		if ebClient != nil {
 			if err := ebClient.RefundCoins(cbData.UserID, dbRecord.CoinCost, "求片被拒绝退还"); err != nil {
 				log.Printf("[求片] 货币退还失败 (userID=%d, requestID=%d, 应退=%d): %v", cbData.UserID, dbRecord.ID, dbRecord.CoinCost, err)
+				// 退还失败时在通知消息中提示
+				notifyText += "\n\n⚠️ 货币退还失败，请联系管理员处理"
 			} else {
 				log.Printf("[求片] 货币退还成功 (userID=%d, amount=%d)", cbData.UserID, dbRecord.CoinCost)
+				// 退还成功后查询最新余额，用于退还信息展示
+				balance := -1
+				userInfo, err := ebClient.GetUserInfo(cbData.UserID)
+				if err != nil {
+					log.Printf("[求片] 退还后余额查询失败 (userID=%d): %v", cbData.UserID, err)
+				} else {
+					balance = userInfo.Data.Iv
+				}
+				currencyName := ch.getCurrencyName(cbData.ChatID)
+				notifyText += FormatRefundInfo(dbRecord.CoinCost, balance, currencyName)
 			}
 		}
+	}
+
+	// 在原求片群聊中发送通知消息
+	notifyMsg := tgbotapi.NewMessage(cbData.ChatID, notifyText)
+	notifyMsg.ParseMode = "Markdown"
+	if _, err := ch.bot.Send(notifyMsg); err != nil {
+		log.Printf("[求片] 在群聊 %d 中发送通知失败: %v", cbData.ChatID, err)
 	}
 
 	// 更新所有管理员私聊中的消息：替换标题为处理结果标记，并移除按钮
@@ -1191,4 +1219,32 @@ func stripSeasonFromName(name string) (string, int) {
 
 	// 未匹配任何季数格式，返回原名称
 	return name, 0
+}
+
+// FormatDeductionInfo 格式化扣费信息。
+// cost: 扣除的货币数量；balance: 扣除后的余额，负数表示余额查询失败；
+// currencyName: 货币名称。
+// cost <= 0 时返回空字符串，balance < 0 时省略余额展示。
+func FormatDeductionInfo(cost int, balance int, currencyName string) string {
+	if cost <= 0 {
+		return ""
+	}
+	if balance >= 0 {
+		return fmt.Sprintf("\n\n💰 本次消耗 %d %s，剩余 %d %s", cost, currencyName, balance, currencyName)
+	}
+	return fmt.Sprintf("\n\n💰 本次消耗 %d %s", cost, currencyName)
+}
+
+// FormatRefundInfo 格式化退还信息。
+// refunded: 退还的货币数量；balance: 退还后的余额，负数表示余额查询失败；
+// currencyName: 货币名称。
+// refunded <= 0 时返回空字符串，balance < 0 时省略余额展示。
+func FormatRefundInfo(refunded int, balance int, currencyName string) string {
+	if refunded <= 0 {
+		return ""
+	}
+	if balance >= 0 {
+		return fmt.Sprintf("\n\n💰 已退还 %d %s，当前余额 %d %s", refunded, currencyName, balance, currencyName)
+	}
+	return fmt.Sprintf("\n\n💰 已退还 %d %s", refunded, currencyName)
 }
