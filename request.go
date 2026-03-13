@@ -25,14 +25,15 @@ const sessionTimeout = 5 * time.Minute
 
 // RequestSession 单个求片会话，跟踪用户的求片流程状态
 type RequestSession struct {
-	UserID     int64             // 请求者 Telegram 用户 ID
-	UserName   string            // 请求者用户名
-	ChatID     int64             // 所在群聊 ID
-	TMDBResult *TMDBSearchResult // AI 选中的 TMDB 条目
-	IsRemaster bool              // 是否为洗版请求
-	State      RequestState      // 当前会话状态
-	CreatedAt  time.Time         // 会话创建时间
-	ExpiresAt  time.Time         // 会话超时时间（5分钟）
+	UserID      int64              // 请求者 Telegram 用户 ID
+	UserName    string             // 请求者用户名
+	ChatID      int64              // 所在群聊 ID
+	TMDBResults []TMDBSearchResult // TMDB 搜索候选列表，用户通过按钮选择
+	TMDBResult  *TMDBSearchResult  // 用户最终选定的 TMDB 条目
+	IsRemaster  bool               // 是否为洗版请求
+	State       RequestState       // 当前会话状态
+	CreatedAt   time.Time          // 会话创建时间
+	ExpiresAt   time.Time          // 会话超时时间（5分钟）
 }
 
 // RequestHandler 求片请求处理器，管理所有活跃的求片会话
@@ -147,6 +148,46 @@ type CallbackData struct {
 // callbackPrefix 回调数据前缀，用于区分求片相关的回调
 const callbackPrefix = "request"
 
+// selectCallbackPrefix 用户选择 TMDB 搜索结果的回调前缀
+const selectCallbackPrefix = "reqsel"
+
+// SelectCallbackData 用户选择 TMDB 搜索结果的回调数据
+type SelectCallbackData struct {
+	ChatID int64 // 群聊 ID
+	UserID int64 // 请求者用户 ID
+	Index  int   // 选中的候选条目索引（0-based）
+}
+
+// FormatSelectCallbackData 编码用户选择回调数据
+// 格式：reqsel:{chatID}:{userID}:{index}
+func FormatSelectCallbackData(data *SelectCallbackData) string {
+	return fmt.Sprintf("%s:%d:%d:%d", selectCallbackPrefix, data.ChatID, data.UserID, data.Index)
+}
+
+// ParseSelectCallbackData 解析用户选择回调数据
+func ParseSelectCallbackData(data string) (*SelectCallbackData, error) {
+	parts := strings.Split(data, ":")
+	if len(parts) != 4 {
+		return nil, fmt.Errorf("选择回调数据格式错误，期望 4 段，实际 %d 段", len(parts))
+	}
+	if parts[0] != selectCallbackPrefix {
+		return nil, fmt.Errorf("选择回调前缀错误：%s", parts[0])
+	}
+	chatID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("解析 ChatID 失败：%w", err)
+	}
+	userID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("解析 UserID 失败：%w", err)
+	}
+	index, err := strconv.Atoi(parts[3])
+	if err != nil {
+		return nil, fmt.Errorf("解析索引失败：%w", err)
+	}
+	return &SelectCallbackData{ChatID: chatID, UserID: userID, Index: index}, nil
+}
+
 // FormatCallbackData 将回调数据编码为字符串
 // 格式：request:{action}:{chatID}:{userID}:{tmdbID}
 // 注意：Title 不编码到回调数据中，因为 Telegram 回调数据有 64 字节限制
@@ -224,7 +265,7 @@ func FormatAdminMessage(session *RequestSession, groupName string, existingItems
 	sb.WriteString(fmt.Sprintf("📅 年份：%s\n", result.GetYear()))
 	sb.WriteString(fmt.Sprintf("🎭 类型：%s\n", mediaTypeStr))
 	sb.WriteString(fmt.Sprintf("🔗 TMDB：%s\n", result.GetTMDBURL()))
-	sb.WriteString(fmt.Sprintf("👤 请求者：%s (ID: %d)\n", session.UserName, session.UserID))
+	sb.WriteString(fmt.Sprintf("👤 请求者：[%s](tg://user?id=%d)\n", session.UserName, session.UserID))
 
 	// 仅当洗版请求时显示洗版标记和现有版本质量信息
 	if session.IsRemaster {
@@ -242,7 +283,13 @@ func FormatAdminMessage(session *RequestSession, groupName string, existingItems
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\n来自群组：%s", groupName))
+	// 构建群组链接：将负数 chat_id 转换为 Telegram 群组链接格式
+	groupLink := groupName
+	chatIDStr := fmt.Sprintf("%d", session.ChatID)
+	if strings.HasPrefix(chatIDStr, "-100") {
+		groupLink = fmt.Sprintf("[%s](https://t.me/c/%s/1)", groupName, chatIDStr[4:])
+	}
+	sb.WriteString(fmt.Sprintf("\n来自群组：%s", groupLink))
 
 	return sb.String()
 }
@@ -361,196 +408,190 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 		return
 	}
 
-	// 第五步：如果有多个结果，调用 AI 从候选列表中选择最匹配的条目
-	selectedIdx := 0
-	if len(results) > 1 {
-		formatted := FormatTMDBResultsForAI(results)
-		selectMessages := []ChatMessage{
-			{
-				Role: "system",
-				Content: MessageContent{Text: "你是一个影视匹配助手。用户想找一部影视作品，以下是 TMDB 搜索到的候选列表。" +
-					"请根据用户的描述选择最匹配的一条，只返回序号数字（如 1、2、3），不要返回其他内容。"},
-			},
-			{
-				Role:    "user",
-				Content: MessageContent{Text: fmt.Sprintf("用户描述：%s\n\n候选列表：\n%s", text, formatted)},
-			},
-		}
-
-		selectResp, err := ch.aiClient.ChatCompletion(selectMessages, nil)
-		if err != nil {
-			log.Printf("[求片] AI 选择候选条目失败: %v，默认选择第一条", err)
-		} else {
-			// 解析 AI 返回的序号
-			idxStr := strings.TrimSpace(selectResp.Content.Text)
-			if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 1 && idx <= len(results) {
-				selectedIdx = idx - 1
-			}
-		}
-	}
-
-	selected := &results[selectedIdx]
-
-	// 第六步：向用户发送确认消息
-	confirmText := fmt.Sprintf("你要找的是《%s》（%s年）吗？回复「是」确认，「不是」重新搜索",
-		selected.GetDisplayTitle(), selected.GetYear())
-	reply := tgbotapi.NewMessage(chatID, confirmText)
-	reply.ReplyToMessageID = msg.MessageID
-	ch.bot.Send(reply)
-
-	// 第七步：创建 StateWaitConfirm 状态的会话，存入 sessions map
+	// 第五步：构建 Inline Keyboard 按钮列表，展示搜索结果供用户选择
 	userName := msg.From.FirstName
 	if msg.From.LastName != "" {
 		userName += " " + msg.From.LastName
 	}
 
+	// 构建候选列表文本和选择按钮
+	var sb strings.Builder
+	sb.WriteString("🔍 找到以下结果，请点击选择：\n\n")
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i, r := range results {
+		mediaIcon := "🎬"
+		if r.MediaType == "tv" {
+			mediaIcon = "📺"
+		}
+		year := r.GetYear()
+		title := r.GetDisplayTitle()
+		sb.WriteString(fmt.Sprintf("%s %d. %s（%s）\n", mediaIcon, i+1, title, year))
+
+		// 按钮文本：序号 + 标题 + 年份，回调数据编码索引
+		btnText := fmt.Sprintf("%d. %s（%s）", i+1, title, year)
+		// Telegram 按钮文本有长度限制，截断过长的标题
+		if len([]rune(btnText)) > 40 {
+			btnText = string([]rune(btnText)[:37]) + "..."
+		}
+		cbData := FormatSelectCallbackData(&SelectCallbackData{
+			ChatID: chatID,
+			UserID: userID,
+			Index:  i,
+		})
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
+		))
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	reply := tgbotapi.NewMessage(chatID, sb.String())
+	reply.ReplyToMessageID = msg.MessageID
+	reply.ReplyMarkup = keyboard
+	ch.bot.Send(reply)
+
+	// 第六步：创建 StateWaitConfirm 状态的会话，存储所有候选结果
 	rh.mu.Lock()
 	rh.sessions[sessionKey(chatID, userID)] = &RequestSession{
-		UserID:     userID,
-		UserName:   userName,
-		ChatID:     chatID,
-		TMDBResult: selected,
-		IsRemaster: intent.IsRemaster,
-		State:      StateWaitConfirm,
-		CreatedAt:  time.Now(),
-		ExpiresAt:  time.Now().Add(sessionTimeout),
+		UserID:      userID,
+		UserName:    userName,
+		ChatID:      chatID,
+		TMDBResults: results,
+		IsRemaster:  intent.IsRemaster,
+		State:       StateWaitConfirm,
+		CreatedAt:   time.Now(),
+		ExpiresAt:   time.Now().Add(sessionTimeout),
 	}
 	rh.mu.Unlock()
 }
 
-// HandleConfirmation 处理用户对 TMDB 匹配结果的确认或否认回复
-// 流程：获取会话 → 判断确认/否认 → 库存查重 → 转发管理员或拒绝
-func (rh *RequestHandler) HandleConfirmation(ch *ChatHandler, msg *tgbotapi.Message) {
-	chatID := msg.Chat.ID
-	userID := msg.From.ID
+// HandleSelectCallback 处理用户点击 TMDB 搜索结果按钮的回调
+// 流程：验证会话 → 设置选中条目 → 库存查重 → 数据库去重 → 转发管理员
+func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.CallbackQuery) {
+	cbData, err := ParseSelectCallbackData(query.Data)
+	if err != nil {
+		log.Printf("[求片] 解析选择回调数据失败: %v", err)
+		callback := tgbotapi.NewCallback(query.ID, "数据解析失败")
+		ch.bot.Request(callback)
+		return
+	}
 
-	// 获取用户的活跃求片会话
-	session := rh.GetSession(chatID, userID)
+	// 验证回调来源：只有发起求片的用户本人才能选择
+	if query.From.ID != cbData.UserID {
+		callback := tgbotapi.NewCallback(query.ID, "只有发起求片的用户才能选择")
+		ch.bot.Request(callback)
+		return
+	}
+
+	// 获取用户的活跃会话
+	session := rh.GetSession(cbData.ChatID, cbData.UserID)
 	if session == nil || session.State != StateWaitConfirm {
+		callback := tgbotapi.NewCallback(query.ID, "会话已过期，请重新发起求片")
+		ch.bot.Request(callback)
 		return
 	}
 
-	text := strings.TrimSpace(strings.ToLower(msg.Text))
+	// 验证索引有效性
+	if cbData.Index < 0 || cbData.Index >= len(session.TMDBResults) {
+		callback := tgbotapi.NewCallback(query.ID, "无效的选择")
+		ch.bot.Request(callback)
+		return
+	}
 
-	// 判断用户回复是确认还是否认
-	confirmKeywords := []string{"是", "对", "没错", "确认", "yes", "y"}
-	denyKeywords := []string{"不是", "不对", "错了", "否", "no", "n", "换一个"}
+	// 设置用户选中的条目
+	selected := &session.TMDBResults[cbData.Index]
+	session.TMDBResult = selected
 
-	isConfirm := false
-	isDeny := false
+	// 回复 CallbackQuery，消除按钮加载状态
+	callback := tgbotapi.NewCallback(query.ID, fmt.Sprintf("已选择：%s", selected.GetDisplayTitle()))
+	ch.bot.Request(callback)
 
-	// 优先匹配否认关键词（"不是"包含"是"，需先判断否认）
-	for _, kw := range denyKeywords {
-		if text == kw {
-			isDeny = true
-			break
+	// 更新原消息：替换按钮列表为选中结果，移除按钮
+	if query.Message != nil {
+		mediaIcon := "🎬"
+		if selected.MediaType == "tv" {
+			mediaIcon = "📺"
 		}
-	}
-	if !isDeny {
-		for _, kw := range confirmKeywords {
-			if text == kw {
-				isConfirm = true
-				break
-			}
-		}
+		editText := fmt.Sprintf("%s 已选择：%s（%s）\n🔗 %s",
+			mediaIcon, selected.GetDisplayTitle(), selected.GetYear(), selected.GetTMDBURL())
+		editMsg := tgbotapi.NewEditMessageText(cbData.ChatID, query.Message.MessageID, editText)
+		emptyMarkup := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}}
+		editMsg.ReplyMarkup = &emptyMarkup
+		ch.bot.Request(editMsg)
 	}
 
-	// 既不是确认也不是否认，不处理
-	if !isConfirm && !isDeny {
-		return
-	}
-
-	// 用户否认：删除会话，提示重新发起
-	if isDeny {
-		rh.deleteSession(chatID, userID)
-		reply := tgbotapi.NewMessage(chatID, "请提供更精确的描述，然后重新发起求片请求")
-		reply.ReplyToMessageID = msg.MessageID
-		ch.bot.Send(reply)
-		return
-	}
-
-	// 用户确认：进行 Emby 库存查重
+	// 进行 Emby 库存查重
 	var embyItems []EmbyMediaItem
 	embyClient := ch.embyMap[session.ChatID]
 	if embyClient != nil {
-		items, err := embyClient.SearchMedia(session.TMDBResult.GetDisplayTitle())
+		items, err := embyClient.SearchMedia(selected.GetDisplayTitle())
 		if err != nil {
-			// Emby 搜索失败时视为库中无该资源，记录日志后继续流程
 			log.Printf("[求片] Emby 搜索失败，视为库中无该资源: %v", err)
 		} else {
 			embyItems = items
 		}
 	}
 
-	// 调用库存查重决策
 	checkResult := CheckInventory(embyItems, session.IsRemaster)
 
-	// 查重结果为拒绝：通知用户资源已存在，删除会话
+	// 查重拒绝：通知用户资源已存在
 	if !checkResult.Allowed {
-		reply := tgbotapi.NewMessage(chatID, fmt.Sprintf("该资源已存在，无需重复求片。\n%s", checkResult.Reason))
-		reply.ReplyToMessageID = msg.MessageID
+		reply := tgbotapi.NewMessage(cbData.ChatID, fmt.Sprintf("该资源已存在，无需重复求片。\n%s", checkResult.Reason))
 		ch.bot.Send(reply)
-		rh.deleteSession(chatID, userID)
+		rh.deleteSession(cbData.ChatID, cbData.UserID)
 		return
 	}
 
-	// 查重结果为允许：先进行数据库去重检查，再写入数据库
+	// 数据库去重和写入
 	if rh.store != nil {
-		// 数据库去重：检查是否已存在相同用户和 TMDB ID 的活跃请求
-		exists, err := rh.store.HasActiveRequest(chatID, userID, session.TMDBResult.ID)
+		exists, err := rh.store.HasActiveRequest(cbData.ChatID, cbData.UserID, selected.ID)
 		if err != nil {
 			log.Printf("[求片] 数据库去重检查失败: %v", err)
-			reply := tgbotapi.NewMessage(chatID, "⚠️ 系统错误，请稍后再试")
-			reply.ReplyToMessageID = msg.MessageID
+			reply := tgbotapi.NewMessage(cbData.ChatID, "⚠️ 系统错误，请稍后再试")
 			ch.bot.Send(reply)
-			rh.deleteSession(chatID, userID)
+			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
 		}
 		if exists {
-			reply := tgbotapi.NewMessage(chatID, "你已提交过该影视的求片请求，请耐心等待处理")
-			reply.ReplyToMessageID = msg.MessageID
+			reply := tgbotapi.NewMessage(cbData.ChatID, "你已提交过该影视的求片请求，请耐心等待处理")
 			ch.bot.Send(reply)
-			rh.deleteSession(chatID, userID)
+			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
 		}
 
-		// 写入数据库，状态为 pending
 		record := &RequestRecord{
-			ChatID:     chatID,
-			UserID:     userID,
+			ChatID:     cbData.ChatID,
+			UserID:     cbData.UserID,
 			UserName:   session.UserName,
-			TMDBID:     session.TMDBResult.ID,
-			Title:      session.TMDBResult.GetDisplayTitle(),
-			MediaType:  session.TMDBResult.MediaType,
-			Year:       session.TMDBResult.GetYear(),
+			TMDBID:     selected.ID,
+			Title:      selected.GetDisplayTitle(),
+			MediaType:  selected.MediaType,
+			Year:       selected.GetYear(),
 			IsRemaster: session.IsRemaster,
 		}
 		if err := rh.store.InsertRequest(record); err != nil {
 			log.Printf("[求片] 写入数据库失败: %v", err)
-			reply := tgbotapi.NewMessage(chatID, "⚠️ 系统错误，请稍后再试")
-			reply.ReplyToMessageID = msg.MessageID
+			reply := tgbotapi.NewMessage(cbData.ChatID, "⚠️ 系统错误，请稍后再试")
 			ch.bot.Send(reply)
-			rh.deleteSession(chatID, userID)
+			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
 		}
 	}
 
-	// 获取群组名称，格式化消息，转发给管理员
+	// 获取群组名称，转发给管理员
 	groupName := ""
-	if group := ch.appConfig.GetGroupConfig(chatID); group != nil && group.ServerName != "" {
+	if group := ch.appConfig.GetGroupConfig(cbData.ChatID); group != nil && group.ServerName != "" {
 		groupName = group.ServerName
-	} else if msg.Chat.Title != "" {
-		groupName = msg.Chat.Title
+	} else if query.Message != nil && query.Message.Chat.Title != "" {
+		groupName = query.Message.Chat.Title
 	}
 
 	adminMsg := FormatAdminMessage(session, groupName, checkResult.ExistingItems)
 	keyboard := BuildApprovalKeyboard(session)
 
-	// 遍历管理员列表，向每个管理员私聊发送转发消息
-	// 跟踪转发成功数，用于判断是否所有管理员都无法收到通知
 	forwardSuccess := 0
 	for _, adminID := range ch.appConfig.Global.BotAdmins {
 		forwardMsg := tgbotapi.NewMessage(adminID, adminMsg)
+		forwardMsg.ParseMode = "Markdown"
 		forwardMsg.ReplyMarkup = keyboard
 		if _, err := ch.bot.Send(forwardMsg); err != nil {
 			log.Printf("[求片] 向管理员 %d 转发求片请求失败: %v", adminID, err)
@@ -559,20 +600,16 @@ func (rh *RequestHandler) HandleConfirmation(ch *ChatHandler, msg *tgbotapi.Mess
 		}
 	}
 
-	// 根据转发结果在群聊中给出不同反馈
 	var replyText string
 	if forwardSuccess == 0 && len(ch.appConfig.Global.BotAdmins) > 0 {
-		// 所有管理员转发均失败，告知用户管理员暂时无法收到通知
 		replyText = "请求已提交，但管理员暂时无法收到通知，请稍后联系管理员确认"
 	} else {
 		replyText = "请求已提交，等待管理员处理"
 	}
-	reply := tgbotapi.NewMessage(chatID, replyText)
-	reply.ReplyToMessageID = msg.MessageID
+	reply := tgbotapi.NewMessage(cbData.ChatID, replyText)
 	ch.bot.Send(reply)
 
-	// 清理会话
-	rh.deleteSession(chatID, userID)
+	rh.deleteSession(cbData.ChatID, cbData.UserID)
 }
 
 // HandleCallbackQuery 处理管理员点击 Inline Keyboard 按钮的回调
@@ -588,7 +625,24 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 	}
 
 	// 根据 action 类型构建通知消息，使用 Markdown 链接 @ 请求者
-	userLink := fmt.Sprintf("[用户](tg://user?id=%d)", cbData.UserID)
+	// 先从数据库查找用户名，用于构建更友好的链接文本
+	userName := "用户"
+	var dbRecord *RequestRecord
+	if rh.store != nil {
+		record, err := rh.store.FindPendingRequest(cbData.ChatID, cbData.UserID, cbData.TMDBID)
+		if err != nil {
+			log.Printf("[求片] 查找数据库记录失败: %v", err)
+		} else if record != nil {
+			dbRecord = record
+			if record.UserName != "" {
+				userName = record.UserName
+			}
+		} else {
+			log.Printf("[求片] 未找到对应的 pending 记录: chatID=%d, userID=%d, tmdbID=%d", cbData.ChatID, cbData.UserID, cbData.TMDBID)
+		}
+	}
+
+	userLink := fmt.Sprintf("[%s](tg://user?id=%d)", userName, cbData.UserID)
 	var notifyText string
 	var statusLabel string
 
@@ -609,23 +663,16 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 	}
 
 	// 更新数据库中对应记录的状态
-	if rh.store != nil {
-		record, err := rh.store.FindPendingRequest(cbData.ChatID, cbData.UserID, cbData.TMDBID)
-		if err != nil {
-			log.Printf("[求片] 查找数据库记录失败: %v", err)
-		} else if record != nil {
-			var dbStatus string
-			switch cbData.Action {
-			case "approve":
-				dbStatus = "approved"
-			case "reject":
-				dbStatus = "rejected"
-			}
-			if err := rh.store.UpdateStatus(record.ID, dbStatus); err != nil {
-				log.Printf("[求片] 更新数据库状态失败: %v", err)
-			}
-		} else {
-			log.Printf("[求片] 未找到对应的 pending 记录: chatID=%d, userID=%d, tmdbID=%d", cbData.ChatID, cbData.UserID, cbData.TMDBID)
+	if dbRecord != nil {
+		var dbStatus string
+		switch cbData.Action {
+		case "approve":
+			dbStatus = "approved"
+		case "reject":
+			dbStatus = "rejected"
+		}
+		if err := rh.store.UpdateStatus(dbRecord.ID, dbStatus); err != nil {
+			log.Printf("[求片] 更新数据库状态失败: %v", err)
 		}
 	}
 
@@ -642,18 +689,14 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 			newText = statusLabel + "\n" + originalText
 		}
 
-		// 编辑消息文本
+		// 编辑消息文本并同时移除 Inline Keyboard 按钮
 		editMsg := tgbotapi.NewEditMessageText(adminChatID, adminMsgID, newText)
-		if _, err := ch.bot.Request(editMsg); err != nil {
-			log.Printf("[求片] 更新管理员消息文本失败: %v", err)
-		}
-
-		// 移除 Inline Keyboard 按钮
-		emptyMarkup := tgbotapi.NewEditMessageReplyMarkup(adminChatID, adminMsgID, tgbotapi.InlineKeyboardMarkup{
+		emptyMarkup := tgbotapi.InlineKeyboardMarkup{
 			InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{},
-		})
-		if _, err := ch.bot.Request(emptyMarkup); err != nil {
-			log.Printf("[求片] 移除管理员消息按钮失败: %v", err)
+		}
+		editMsg.ReplyMarkup = &emptyMarkup
+		if _, err := ch.bot.Request(editMsg); err != nil {
+			log.Printf("[求片] 更新管理员消息失败: %v", err)
 		}
 	}
 

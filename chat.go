@@ -110,10 +110,12 @@ func (ch *ChatHandler) StartListening() {
 			continue
 		}
 
-		// 处理管理员审批回调（Inline Keyboard 按钮点击）
+		// 处理管理员审批回调和用户选择 TMDB 结果回调
 		if update.CallbackQuery != nil {
 			if strings.HasPrefix(update.CallbackQuery.Data, "request:") {
 				ch.requestHandler.HandleCallbackQuery(ch, update.CallbackQuery)
+			} else if strings.HasPrefix(update.CallbackQuery.Data, "reqsel:") {
+				ch.requestHandler.HandleSelectCallback(ch, update.CallbackQuery)
 			}
 			continue
 		}
@@ -133,14 +135,6 @@ func (ch *ChatHandler) StartListening() {
 		if ch.detectRequestIntent(update.Message) {
 			go ch.requestHandler.HandleRequest(ch, update.Message, update.Message.Text)
 			continue
-		}
-
-		// 检测用户是否有活跃的求片确认会话
-		if update.Message.From != nil {
-			if session := ch.requestHandler.GetSession(update.Message.Chat.ID, update.Message.From.ID); session != nil && session.State == StateWaitConfirm {
-				go ch.requestHandler.HandleConfirmation(ch, update.Message)
-				continue
-			}
 		}
 
 		// 处理管理员命令（无论 AI 是否启用都处理）
