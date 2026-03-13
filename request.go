@@ -811,7 +811,18 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 				userName = record.UserName
 			}
 		} else {
-			log.Printf("[求片] 未找到对应的 pending 记录: chatID=%d, userID=%d, tmdbID=%d", cbData.ChatID, cbData.UserID, cbData.TMDBID)
+			// 未找到 pending 记录，说明已被其他管理员处理过
+			// 更新当前管理员的消息移除按钮，避免重复操作
+			log.Printf("[求片] 未找到对应的 pending 记录（可能已被处理）: chatID=%d, userID=%d, tmdbID=%d", cbData.ChatID, cbData.UserID, cbData.TMDBID)
+			if query.Message != nil {
+				editMsg := tgbotapi.NewEditMessageText(query.Message.Chat.ID, query.Message.MessageID, "🎬 求片请求（已被其他管理员处理）")
+				emptyMarkup := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}}
+				editMsg.ReplyMarkup = &emptyMarkup
+				ch.bot.Request(editMsg)
+			}
+			callback := tgbotapi.NewCallback(query.ID, "该请求已被其他管理员处理")
+			ch.bot.Request(callback)
+			return
 		}
 	}
 
@@ -851,14 +862,18 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 
 	// 更新所有管理员私聊中的消息：替换标题为处理结果标记，并移除按钮
 	// 通过数据库查询所有管理员的消息 ID，确保每个管理员的消息都被更新
+	var adminMsgs []AdminMessage
 	if dbRecord != nil && rh.store != nil {
-		adminMsgs, err := rh.store.GetAdminMessages(dbRecord.ID)
+		msgs, err := rh.store.GetAdminMessages(dbRecord.ID)
 		if err != nil {
 			log.Printf("[求片] 查询管理员消息记录失败: %v", err)
+		} else {
+			adminMsgs = msgs
 		}
+	}
+
+	if len(adminMsgs) > 0 {
 		for _, am := range adminMsgs {
-			// 对于当前点击的管理员，使用原消息文本来构建新文本
-			// 对于其他管理员，也使用相同的状态标记
 			var newText string
 			if query.Message != nil && am.AdminID == query.Message.Chat.ID && am.MessageID == query.Message.MessageID {
 				originalText := query.Message.Text
@@ -872,6 +887,7 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 			}
 
 			editMsg := tgbotapi.NewEditMessageText(am.AdminID, am.MessageID, newText)
+			editMsg.ParseMode = "Markdown"
 			emptyMarkup := tgbotapi.InlineKeyboardMarkup{
 				InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{},
 			}
@@ -881,7 +897,7 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 			}
 		}
 	} else if query.Message != nil {
-		// 回退逻辑：数据库不可用时只更新当前管理员的消息
+		// 回退逻辑：数据库中无消息记录时只更新当前管理员的消息
 		adminChatID := query.Message.Chat.ID
 		adminMsgID := query.Message.MessageID
 		originalText := query.Message.Text
@@ -892,6 +908,7 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		}
 
 		editMsg := tgbotapi.NewEditMessageText(adminChatID, adminMsgID, newText)
+		editMsg.ParseMode = "Markdown"
 		emptyMarkup := tgbotapi.InlineKeyboardMarkup{
 			InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{},
 		}
