@@ -32,6 +32,7 @@ type RequestSession struct {
 	TMDBResults []TMDBSearchResult // TMDB 搜索候选列表，用户通过按钮选择
 	TMDBResult  *TMDBSearchResult  // 用户最终选定的 TMDB 条目
 	IsRemaster  bool               // 是否为洗版请求
+	Season      int                // 用户指定的季数（0 表示未指定）
 	State       RequestState       // 当前会话状态
 	CreatedAt   time.Time          // 会话创建时间
 	ExpiresAt   time.Time          // 会话超时时间（5分钟）
@@ -140,12 +141,13 @@ type InventoryCheckResult struct {
 	IsRemasterRequest bool            // 是否标记为洗版请求
 }
 
-// CheckInventory 根据 Emby 搜索结果和洗版标志判断求片请求是否允许继续
+// CheckInventory 根据 Emby 搜索结果、洗版标志和季数判断求片请求是否允许继续
 // 规则：
 //   - Emby 结果为空 → 允许（库中无该资源）
-//   - 非空且 isRemaster 为 false → 拒绝，附带已有资源信息
 //   - 非空且 isRemaster 为 true → 允许，标记为洗版请求
-func CheckInventory(embyItems []EmbyMediaItem, isRemaster bool) *InventoryCheckResult {
+//   - 非空且为 TV 类型且指定了季数 → 允许（Emby 按标题搜索无法精确到季，不应阻止新季求片）
+//   - 非空且非洗版且非新季请求 → 拒绝，附带已有资源信息
+func CheckInventory(embyItems []EmbyMediaItem, isRemaster bool, mediaType string, season int) *InventoryCheckResult {
 	// Emby 搜索结果为空，库中无该资源，允许请求继续
 	if len(embyItems) == 0 {
 		return &InventoryCheckResult{
@@ -161,6 +163,16 @@ func CheckInventory(embyItems []EmbyMediaItem, isRemaster bool) *InventoryCheckR
 			Reason:            "洗版请求，现有资源将被替换",
 			ExistingItems:     embyItems,
 			IsRemasterRequest: true,
+		}
+	}
+
+	// TV 类型且指定了季数：Emby 按标题搜索只能匹配到系列级别，
+	// 无法判断具体某一季是否存在，因此允许继续并将已有信息附带给管理员参考
+	if mediaType == "tv" && season > 0 {
+		return &InventoryCheckResult{
+			Allowed:       true,
+			Reason:        fmt.Sprintf("求片第 %d 季，库中已有该系列但无法确认是否包含该季", season),
+			ExistingItems: embyItems,
 		}
 	}
 
@@ -527,6 +539,7 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 		ChatID:      chatID,
 		TMDBResults: results,
 		IsRemaster:  intent.IsRemaster,
+		Season:      intent.Season,
 		State:       StateWaitConfirm,
 		CreatedAt:   time.Now(),
 		ExpiresAt:   time.Now().Add(sessionTimeout),
@@ -604,7 +617,7 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		}
 	}
 
-	checkResult := CheckInventory(embyItems, session.IsRemaster)
+	checkResult := CheckInventory(embyItems, session.IsRemaster, selected.MediaType, session.Season)
 
 	// 查重拒绝：通知用户资源已存在
 	if !checkResult.Allowed {
@@ -828,6 +841,7 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 
 	var mediaType string
 	var isRemaster bool
+	var season int
 
 	aiResp, err := ch.aiClient.ChatCompletion(intentMessages, nil)
 	if err != nil {
@@ -846,13 +860,16 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 			}
 			mediaType = intent.Type
 			isRemaster = intent.IsRemaster
+			season = intent.Season
 		}
 	}
 
 	// 正则兜底：从名称中剥离季数信息，确保纯剧名传给 TMDB 搜索
 	cleanName, regexSeason := stripSeasonFromName(movieName)
 	movieName = cleanName
-	_ = regexSeason // 季数信息在此入口暂不使用，但确保搜索关键词纯净
+	if season == 0 && regexSeason > 0 {
+		season = regexSeason
+	}
 
 	// 搜索 TMDB
 	results, err := tmdbClient.SearchMulti(movieName, mediaType)
@@ -915,6 +932,7 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 		ChatID:      chatID,
 		TMDBResults: results,
 		IsRemaster:  isRemaster,
+		Season:      season,
 		State:       StateWaitConfirm,
 		CreatedAt:   time.Now(),
 		ExpiresAt:   time.Now().Add(sessionTimeout),
