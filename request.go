@@ -53,6 +53,19 @@ func NewRequestHandler(store *RequestStore) *RequestHandler {
 	}
 }
 
+// ResolveAdmins 解析指定群组的求片管理员列表。
+// 优先返回群组级 request_admins，为空时回退到全局 bot_admins，
+// 确保通知路由在运行时动态决定，无需重启即可生效。
+// 返回值：(管理员 ID 列表, 来源标识 "group" 或 "global")
+func ResolveAdmins(groupAdmins []int64, globalAdmins []int64) ([]int64, string) {
+	// 群组级管理员列表非空时优先使用，实现群组级定向投递
+	if len(groupAdmins) > 0 {
+		return groupAdmins, "group"
+	}
+	// 群组未配置或为空数组时，回退到全局管理员列表作为兜底
+	return globalAdmins, "global"
+}
+
 // sessionKey 生成会话的唯一键，格式为 "chatID:userID"
 func sessionKey(chatID, userID int64) string {
 	return fmt.Sprintf("%d:%d", chatID, userID)
@@ -715,10 +728,11 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		}
 	}
 
-	// 获取群组名称，转发给管理员
+	// 获取群组名称和群组级管理员配置，用于通知路由
 	groupName := ""
-	if group := ch.appConfig.GetGroupConfig(cbData.ChatID); group != nil && group.ServerName != "" {
-		groupName = group.ServerName
+	groupForNotify := ch.appConfig.GetGroupConfig(cbData.ChatID)
+	if groupForNotify != nil && groupForNotify.ServerName != "" {
+		groupName = groupForNotify.ServerName
 	} else if query.Message != nil && query.Message.Chat.Title != "" {
 		groupName = query.Message.Chat.Title
 	}
@@ -726,10 +740,25 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	adminMsg := FormatAdminMessage(session, groupName, checkResult.ExistingItems)
 	keyboard := BuildApprovalKeyboard(session)
 
-	log.Printf("[求片] 准备转发管理员，管理员列表: %v，影片: %s", ch.appConfig.Global.BotAdmins, selected.GetDisplayTitle())
+	// 运行时动态解析管理员列表：优先群组级 request_admins，为空时回退全局 bot_admins
+	var groupAdmins []int64
+	if groupForNotify != nil {
+		groupAdmins = groupForNotify.RequestAdmins
+	}
+	admins, source := ResolveAdmins(groupAdmins, ch.appConfig.Global.BotAdmins)
+	log.Printf("[求片] 使用%s管理员列表: %v", source, admins)
+
+	// 群组级和全局管理员均为空时，记录警告并通知用户
+	if len(admins) == 0 {
+		log.Printf("[求片] 警告：群组 %d 无可用管理员（request_admins 和 bot_admins 均为空）", cbData.ChatID)
+		reply := tgbotapi.NewMessage(cbData.ChatID, "当前无可用管理员处理求片请求")
+		ch.bot.Send(reply)
+		rh.deleteSession(cbData.ChatID, cbData.UserID)
+		return
+	}
 
 	forwardSuccess := 0
-	for _, adminID := range ch.appConfig.Global.BotAdmins {
+	for _, adminID := range admins {
 		forwardMsg := tgbotapi.NewMessage(adminID, adminMsg)
 		forwardMsg.ParseMode = "Markdown"
 		forwardMsg.ReplyMarkup = keyboard
@@ -747,7 +776,7 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	}
 
 	var replyText string
-	if forwardSuccess == 0 && len(ch.appConfig.Global.BotAdmins) > 0 {
+	if forwardSuccess == 0 && len(admins) > 0 {
 		replyText = "请求已提交，但管理员暂时无法收到通知，请稍后联系管理员确认"
 	} else {
 		replyText = "请求已提交，等待管理员处理"

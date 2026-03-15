@@ -51,6 +51,7 @@ type GroupConfig struct {
 	AIKnowledgeDir       string           `json:"ai_knowledge_dir"`
 	AIEmbyStatsFormat    string           `json:"ai_emby_stats_format"`
 	RequestEnabled       bool             `json:"request_enabled"`   // 求片功能开关，默认 false
+	RequestAdmins        []int64          `json:"request_admins"`    // 群组级求片管理员列表，为空时回退到全局 bot_admins
 	RequestCoinCost      int              `json:"request_coin_cost"` // 每次求片消耗货币数，默认 0（不消耗）
 	AIImageEnabled       bool             `json:"ai_image_enabled"`  // 图片生成开关，默认 false
 	AIImageModel         string           `json:"ai_image_model"`    // 图片生成模型名称，如 "dall-e-3"

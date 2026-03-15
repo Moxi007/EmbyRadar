@@ -31,6 +31,7 @@
       },
       "ai_knowledge_dir": "config/knowledge",
       "ai_emby_stats_format": "",
+      "request_admins": [111111111, 222222222],
       "request_enabled": false,
       "request_coin_cost": 0,
       "ai_image_enabled": false,
