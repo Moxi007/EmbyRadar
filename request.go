@@ -1051,15 +1051,21 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 	var notifyText string
 	var statusLabel string
 
+	movieInfo := "求片"
+	if dbRecord != nil {
+		tmdbLink := fmt.Sprintf("https://www.themoviedb.org/%s/%d", dbRecord.MediaType, dbRecord.TMDBID)
+		movieInfo = fmt.Sprintf("[%s](%s)", cleanMarkdownName(dbRecord.Title), tmdbLink)
+	}
+
 	switch cbData.Action {
 	case "approve":
-		notifyText = fmt.Sprintf("%s 你的求片请求已通过，管理员正在处理中", userLink)
+		notifyText = fmt.Sprintf("🎉 %s，你的 %s 请求已通过，管理员正在处理中。", userLink, movieInfo)
 		statusLabel = "🎬 求片请求（已通过 ✅）"
 	case "reject":
-		notifyText = fmt.Sprintf("%s 你的求片请求已被拒绝", userLink)
+		notifyText = fmt.Sprintf("❌ %s，你的 %s 请求已被拒绝。", userLink, movieInfo)
 		statusLabel = "🎬 求片请求（已拒绝 ❌）"
 	case "reject_no_resource":
-		notifyText = fmt.Sprintf("%s 你的求片请求被拒绝：该资源暂时没有资源，请耐心等待", userLink)
+		notifyText = fmt.Sprintf("📭 %s，你的 %s 请求被拒绝：暂时没有资源，请耐心等待。", userLink, movieInfo)
 		statusLabel = "🎬 求片请求（暂无资源 📭）"
 	}
 
