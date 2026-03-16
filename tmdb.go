@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -145,14 +148,141 @@ func (tc *TMDBClient) SearchMulti(query, mediaType string) ([]TMDBSearchResult, 
 	return results, nil
 }
 
+// GetByID 通过 TMDB ID 和媒体类型直接获取影视详情
+// mediaType 必须为 "movie" 或 "tv"
+func (tc *TMDBClient) GetByID(id int, mediaType string) (*TMDBSearchResult, error) {
+	if mediaType != "movie" && mediaType != "tv" {
+		return nil, fmt.Errorf("无效的媒体类型: %s，仅支持 movie 或 tv", mediaType)
+	}
+
+	reqURL := fmt.Sprintf("%s/%s/%d?api_key=%s&language=zh-CN",
+		tc.BaseURL, mediaType, id, tc.APIKey)
+
+	resp, err := tc.HTTPClient.Get(reqURL)
+	if err != nil {
+		return nil, fmt.Errorf("TMDB 详情请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("TMDB API 响应非 200: %d", resp.StatusCode)
+	}
+
+	var result TMDBSearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析 TMDB 详情失败: %w", err)
+	}
+
+	// 手动设置 MediaType，因为 details 端点响应中不含此字段
+	result.MediaType = mediaType
+	return &result, nil
+}
+
+// 预编译 TMDB 和豆瓣链接匹配正则
+var (
+	// 匹配 TMDB 链接：https://www.themoviedb.org/movie/12345 或 /tv/12345
+	reTMDBURL = regexp.MustCompile(`(?i)(?:https?://)?(?:www\.)?themoviedb\.org/(movie|tv)/(\d+)`)
+	// 匹配豆瓣链接：https://movie.douban.com/subject/12345/ 或 douban.com/subject/12345
+	reDoubanURL = regexp.MustCompile(`(?i)(?:https?://)?(?:movie\.)?douban\.com/subject/(\d+)`)
+)
+
+// TMDBLinkInfo 从 TMDB 链接中解析出的信息
+type TMDBLinkInfo struct {
+	ID        int    // TMDB ID
+	MediaType string // "movie" 或 "tv"
+}
+
+// ParseTMDBURL 从文本中解析 TMDB 链接，提取媒体类型和 ID
+// 返回 nil 表示文本中不含有效的 TMDB 链接
+func ParseTMDBURL(text string) *TMDBLinkInfo {
+	matches := reTMDBURL.FindStringSubmatch(text)
+	if len(matches) != 3 {
+		return nil
+	}
+	id, err := strconv.Atoi(matches[2])
+	if err != nil {
+		return nil
+	}
+	return &TMDBLinkInfo{
+		ID:        id,
+		MediaType: strings.ToLower(matches[1]),
+	}
+}
+
+// ParseDoubanURL 从文本中解析豆瓣链接，提取 subject ID
+// 返回 0 表示文本中不含有效的豆瓣链接
+func ParseDoubanURL(text string) int {
+	matches := reDoubanURL.FindStringSubmatch(text)
+	if len(matches) != 2 {
+		return 0
+	}
+	id, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+// FetchDoubanTitle 通过 HTTP 抓取豆瓣影视页面的标题
+// 从 <title> 标签中提取影视名称，用于后续 TMDB 搜索
+func FetchDoubanTitle(doubanID int) (string, error) {
+	pageURL := fmt.Sprintf("https://movie.douban.com/subject/%d/", doubanID)
+
+	req, err := http.NewRequest("GET", pageURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("创建豆瓣请求失败: %w", err)
+	}
+	// 设置 User-Agent 避免被反爬拦截
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("请求豆瓣页面失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("豆瓣页面响应非 200: %d", resp.StatusCode)
+	}
+
+	// 只读取前 64KB，避免全量加载页面
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return "", fmt.Errorf("读取豆瓣页面失败: %w", err)
+	}
+
+	// 从 HTML 中提取 <title> 标签内容
+	// 豆瓣 title 格式通常为："影视名称 (豆瓣)" 或 "影视名称 第X季 (豆瓣)"
+	reTitle := regexp.MustCompile(`<title[^>]*>([^<]+)</title>`)
+	titleMatch := reTitle.FindSubmatch(body)
+	if len(titleMatch) < 2 {
+		return "", fmt.Errorf("未找到豆瓣页面标题")
+	}
+
+	title := strings.TrimSpace(string(titleMatch[1]))
+	// 移除 " (豆瓣)" 后缀
+	title = strings.TrimSuffix(title, " (豆瓣)")
+	title = strings.TrimSpace(title)
+
+	if title == "" {
+		return "", fmt.Errorf("豆瓣页面标题为空")
+	}
+
+	return title, nil
+}
+
 // FormatTMDBResultsForAI 将搜索结果格式化为 AI 可读的文本
-// 每条结果包含序号、标题、年份、评分、简介
+// 每条结果包含序号、标题、年份、评分、简介和 TMDB 链接
 func FormatTMDBResultsForAI(results []TMDBSearchResult) string {
 	if len(results) == 0 {
 		return "未找到相关影视信息。"
 	}
 
 	var sb strings.Builder
+	// 在开头加入强制指令，防止 AI 篡改链接
+	sb.WriteString("⚠️ 重要：回复中引用影视信息时，必须直接复制粘贴下方提供的完整 TMDB 链接，严禁自行拼凑或修改链接中的任何部分！\n\n")
+
 	for i, r := range results {
 		title := r.GetDisplayTitle()
 		year := r.GetYear()
@@ -160,7 +290,7 @@ func FormatTMDBResultsForAI(results []TMDBSearchResult) string {
 		if year != "" {
 			sb.WriteString(fmt.Sprintf("（%s）", year))
 		}
-		sb.WriteString(fmt.Sprintf(" - 评分: %.1f", r.VoteAverage))
+		sb.WriteString(fmt.Sprintf(" - TMDB评分: %.1f", r.VoteAverage))
 		if r.Overview != "" {
 			// 简介过长时截断，避免占用过多 token
 			overview := r.Overview
@@ -169,11 +299,13 @@ func FormatTMDBResultsForAI(results []TMDBSearchResult) string {
 			}
 			sb.WriteString(fmt.Sprintf("\n   简介: %s", overview))
 		}
-		sb.WriteString(fmt.Sprintf("\n   TMDB: %s", r.GetTMDBURL()))
+		sb.WriteString(fmt.Sprintf("\n   TMDB链接(请原样使用): %s", r.GetTMDBURL()))
 		if i < len(results)-1 {
 			sb.WriteString("\n\n")
 		}
 	}
+
+	sb.WriteString("\n\n📌 注意：以上评分为 TMDB 评分。如果需要向用户展示评分，请优先通过搜索工具获取豆瓣评分后展示给用户。")
 
 	return sb.String()
 }

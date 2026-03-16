@@ -412,7 +412,7 @@ type aiIntentResult struct {
 }
 
 // HandleRequest 处理求片请求入口
-// 流程：AI 意图分析 → TMDB 搜索 → AI 选择最佳匹配 → 用户确认
+// 流程：链接检测（TMDB/豆瓣）→ AI 意图分析 → TMDB 搜索 → 用户确认
 func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, text string) {
 	chatID := msg.Chat.ID
 	userID := msg.From.ID
@@ -425,58 +425,7 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 		return
 	}
 
-	// 第一步：调用 AI 分析用户输入，提取影视名称、类型、年份、洗版意图、季数
-	intentMessages := []ChatMessage{
-		{
-			Role: "system",
-			Content: MessageContent{Text: "你是一个影视信息提取助手。请从用户的文本中提取以下信息并以 JSON 格式返回：\n" +
-				"1. name: 影视作品名称\n" +
-				"2. type: 类型，\"movie\"（电影）或 \"tv\"（电视剧），无法判断时留空\n" +
-				"3. year: 年份，无法判断时留空\n" +
-				"4. is_remaster: 是否有洗版意图（用户想要更高清版本），布尔值\n" +
-				"5. season: 季数，整数，无法判断时为 0。如果用户输入中包含季数信息（如\"第X季\"、\"X季\"、\"Season X\"等），请将季数从 name 中分离出来\n\n" +
-				"只返回 JSON，不要包含其他文字。示例：{\"name\":\"流浪地球2\",\"type\":\"movie\",\"year\":\"2023\",\"is_remaster\":false,\"season\":0}"},
-		},
-		{
-			Role:    "user",
-			Content: MessageContent{Text: text},
-		},
-	}
-
-	aiResp, err := ch.aiClient.ChatCompletion(intentMessages, nil)
-	if err != nil {
-		log.Printf("[求片] AI 意图分析失败: %v", err)
-		reply := tgbotapi.NewMessage(chatID, "⚠️ AI 暂时无法处理你的请求，请稍后再试")
-		reply.ReplyToMessageID = msg.MessageID
-		ch.bot.Send(reply)
-		return
-	}
-
-	// 第二步：解析 AI 返回的 JSON，提取关键信息
-	var intent aiIntentResult
-	respText := strings.TrimSpace(aiResp.Content.Text)
-	// 处理 AI 可能返回的 markdown 代码块包裹
-	respText = strings.TrimPrefix(respText, "```json")
-	respText = strings.TrimPrefix(respText, "```")
-	respText = strings.TrimSuffix(respText, "```")
-	respText = strings.TrimSpace(respText)
-
-	if err := json.Unmarshal([]byte(respText), &intent); err != nil {
-		log.Printf("[求片] 解析 AI 意图结果失败: %v, 原始响应: %s", err, aiResp.Content.Text)
-		reply := tgbotapi.NewMessage(chatID, "无法识别你想要的影视作品，请提供更具体的片名或描述")
-		reply.ReplyToMessageID = msg.MessageID
-		ch.bot.Send(reply)
-		return
-	}
-
-	if strings.TrimSpace(intent.Name) == "" {
-		reply := tgbotapi.NewMessage(chatID, "无法识别你想要的影视作品，请提供更具体的片名或描述")
-		reply.ReplyToMessageID = msg.MessageID
-		ch.bot.Send(reply)
-		return
-	}
-
-	// 第三步：获取群组的 TMDBClient，调用 SearchMulti 搜索 TMDB
+	// 获取群组的 TMDBClient
 	tmdbClient := ch.tmdbMap[chatID]
 	if tmdbClient == nil {
 		reply := tgbotapi.NewMessage(chatID, "⚠️ 当前群组未配置 TMDB，无法搜索影视信息")
@@ -485,31 +434,154 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 		return
 	}
 
-	// 正则兜底：从名称中剥离季数信息，确保纯剧名传给 TMDB 搜索
-	cleanName, regexSeason := stripSeasonFromName(intent.Name)
-	if intent.Season == 0 && regexSeason > 0 {
-		intent.Season = regexSeason
-	}
-	intent.Name = cleanName
+	// ========== 链接检测：优先处理 TMDB/豆瓣链接，跳过 AI 意图分析 ==========
+	var results []TMDBSearchResult
+	var isRemaster bool
+	var season int
 
-	results, err := tmdbClient.SearchMulti(intent.Name, intent.Type)
-	if err != nil {
-		log.Printf("[求片] TMDB 搜索失败: %v", err)
-		reply := tgbotapi.NewMessage(chatID, "⚠️ 搜索影视信息时出错，请稍后再试")
-		reply.ReplyToMessageID = msg.MessageID
-		ch.bot.Send(reply)
-		return
-	}
-
-	// 第四步：搜索结果为空，通知用户
-	if len(results) == 0 {
-		reply := tgbotapi.NewMessage(chatID, "未找到相关影视，请尝试更精确的片名")
-		reply.ReplyToMessageID = msg.MessageID
-		ch.bot.Send(reply)
-		return
+	// 检测 TMDB 链接：https://www.themoviedb.org/movie/12345 或 /tv/12345
+	if tmdbLink := ParseTMDBURL(text); tmdbLink != nil {
+		log.Printf("[求片] 检测到 TMDB 链接，直接查询: %s/%d", tmdbLink.MediaType, tmdbLink.ID)
+		result, err := tmdbClient.GetByID(tmdbLink.ID, tmdbLink.MediaType)
+		if err != nil {
+			log.Printf("[求片] TMDB 链接查询失败: %v", err)
+			reply := tgbotapi.NewMessage(chatID, "⚠️ 无法获取该 TMDB 链接对应的影视信息，请检查链接是否正确")
+			reply.ReplyToMessageID = msg.MessageID
+			ch.bot.Send(reply)
+			return
+		}
+		results = []TMDBSearchResult{*result}
+		goto showResults
 	}
 
-	// 第五步：构建 Inline Keyboard 按钮列表，展示搜索结果供用户选择
+	// 检测豆瓣链接：https://movie.douban.com/subject/12345/
+	if doubanID := ParseDoubanURL(text); doubanID > 0 {
+		log.Printf("[求片] 检测到豆瓣链接，抓取标题: doubanID=%d", doubanID)
+
+		// 通知用户正在处理
+		typingAction := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
+		ch.bot.Send(typingAction)
+
+		title, err := FetchDoubanTitle(doubanID)
+		if err != nil {
+			log.Printf("[求片] 抓取豆瓣标题失败: %v", err)
+			reply := tgbotapi.NewMessage(chatID, "⚠️ 无法获取该豆瓣链接对应的影视名称，请直接输入片名重试")
+			reply.ReplyToMessageID = msg.MessageID
+			ch.bot.Send(reply)
+			return
+		}
+
+		log.Printf("[求片] 豆瓣标题: %s，使用标题搜索 TMDB", title)
+
+		// 从豆瓣标题中剥离季数信息
+		cleanName, regexSeason := stripSeasonFromName(title)
+		if regexSeason > 0 {
+			season = regexSeason
+		}
+
+		searchResults, err := tmdbClient.SearchMulti(cleanName, "")
+		if err != nil {
+			log.Printf("[求片] 使用豆瓣标题搜索 TMDB 失败: %v", err)
+			reply := tgbotapi.NewMessage(chatID, fmt.Sprintf("⚠️ 已识别影片「%s」，但 TMDB 搜索失败，请稍后再试", title))
+			reply.ReplyToMessageID = msg.MessageID
+			ch.bot.Send(reply)
+			return
+		}
+		if len(searchResults) == 0 {
+			reply := tgbotapi.NewMessage(chatID, fmt.Sprintf("已识别影片「%s」，但在 TMDB 中未找到对应条目，请尝试直接输入片名", title))
+			reply.ReplyToMessageID = msg.MessageID
+			ch.bot.Send(reply)
+			return
+		}
+		results = searchResults
+		goto showResults
+	}
+
+	// ========== 无链接匹配：走原有的 AI 意图分析流程 ==========
+	{
+		// 调用 AI 分析用户输入，提取影视名称、类型、年份、洗版意图、季数
+		intentMessages := []ChatMessage{
+			{
+				Role: "system",
+				Content: MessageContent{Text: "你是一个影视信息提取助手。请从用户的文本中提取以下信息并以 JSON 格式返回：\n" +
+					"1. name: 影视作品名称\n" +
+					"2. type: 类型，\"movie\"（电影）或 \"tv\"（电视剧），无法判断时留空\n" +
+					"3. year: 年份，无法判断时留空\n" +
+					"4. is_remaster: 是否有洗版意图（用户想要更高清版本），布尔值\n" +
+					"5. season: 季数，整数，无法判断时为 0。如果用户输入中包含季数信息（如\"第X季\"、\"X季\"、\"Season X\"等），请将季数从 name 中分离出来\n\n" +
+					"只返回 JSON，不要包含其他文字。示例：{\"name\":\"流浪地球2\",\"type\":\"movie\",\"year\":\"2023\",\"is_remaster\":false,\"season\":0}"},
+			},
+			{
+				Role:    "user",
+				Content: MessageContent{Text: text},
+			},
+		}
+
+		aiResp, err := ch.aiClient.ChatCompletion(intentMessages, nil)
+		if err != nil {
+			log.Printf("[求片] AI 意图分析失败: %v", err)
+			reply := tgbotapi.NewMessage(chatID, "⚠️ AI 暂时无法处理你的请求，请稍后再试")
+			reply.ReplyToMessageID = msg.MessageID
+			ch.bot.Send(reply)
+			return
+		}
+
+		// 解析 AI 返回的 JSON，提取关键信息
+		var intent aiIntentResult
+		respText := strings.TrimSpace(aiResp.Content.Text)
+		// 处理 AI 可能返回的 markdown 代码块包裹
+		respText = strings.TrimPrefix(respText, "```json")
+		respText = strings.TrimPrefix(respText, "```")
+		respText = strings.TrimSuffix(respText, "```")
+		respText = strings.TrimSpace(respText)
+
+		if err := json.Unmarshal([]byte(respText), &intent); err != nil {
+			log.Printf("[求片] 解析 AI 意图结果失败: %v, 原始响应: %s", err, aiResp.Content.Text)
+			reply := tgbotapi.NewMessage(chatID, "无法识别你想要的影视作品，请提供更具体的片名或描述")
+			reply.ReplyToMessageID = msg.MessageID
+			ch.bot.Send(reply)
+			return
+		}
+
+		if strings.TrimSpace(intent.Name) == "" {
+			reply := tgbotapi.NewMessage(chatID, "无法识别你想要的影视作品，请提供更具体的片名或描述")
+			reply.ReplyToMessageID = msg.MessageID
+			ch.bot.Send(reply)
+			return
+		}
+
+		isRemaster = intent.IsRemaster
+		season = intent.Season
+
+		// 正则兜底：从名称中剥离季数信息，确保纯剧名传给 TMDB 搜索
+		cleanName, regexSeason := stripSeasonFromName(intent.Name)
+		if intent.Season == 0 && regexSeason > 0 {
+			season = regexSeason
+		}
+		intent.Name = cleanName
+
+		searchResults, err := tmdbClient.SearchMulti(intent.Name, intent.Type)
+		if err != nil {
+			log.Printf("[求片] TMDB 搜索失败: %v", err)
+			reply := tgbotapi.NewMessage(chatID, "⚠️ 搜索影视信息时出错，请稍后再试")
+			reply.ReplyToMessageID = msg.MessageID
+			ch.bot.Send(reply)
+			return
+		}
+
+		// 搜索结果为空，通知用户
+		if len(searchResults) == 0 {
+			reply := tgbotapi.NewMessage(chatID, "未找到相关影视，请尝试更精确的片名")
+			reply.ReplyToMessageID = msg.MessageID
+			ch.bot.Send(reply)
+			return
+		}
+
+		results = searchResults
+	}
+
+showResults:
+	// 构建 Inline Keyboard 按钮列表，展示搜索结果供用户选择
 	userName := msg.From.FirstName
 	if msg.From.LastName != "" {
 		userName += " " + msg.From.LastName
@@ -551,15 +623,15 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 	reply.ReplyMarkup = keyboard
 	ch.bot.Send(reply)
 
-	// 第六步：创建 StateWaitConfirm 状态的会话，存储所有候选结果
+	// 创建 StateWaitConfirm 状态的会话，存储所有候选结果
 	rh.mu.Lock()
 	rh.sessions[sessionKey(chatID, userID)] = &RequestSession{
 		UserID:      userID,
 		UserName:    userName,
 		ChatID:      chatID,
 		TMDBResults: results,
-		IsRemaster:  intent.IsRemaster,
-		Season:      intent.Season,
+		IsRemaster:  isRemaster,
+		Season:      season,
 		MessageID:   msg.MessageID,
 		State:       StateWaitConfirm,
 		CreatedAt:   time.Now(),
