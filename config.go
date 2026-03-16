@@ -27,6 +27,7 @@ type GlobalConfig struct {
 	BotAdmins        []int64 `json:"bot_admins"`
 	DBPath           string  `json:"db_path"`      // SQLite 数据库路径，默认 config/embyradar.db
 	TMDBAPIKey       string  `json:"tmdb_api_key"` // TMDB API 密钥，为空时禁用 TMDB 相关功能
+	WebhookPort      int     `json:"webhook_port"` // 全局 Webhook 端口
 }
 
 // GroupConfig 群组级独立配置，每个 Telegram 群组一份
@@ -39,7 +40,6 @@ type GroupConfig struct {
 	EmbyBossCurrencyName string           `json:"embyboss_currency_name"`
 	ServerName           string           `json:"server_name"`
 	UpdateInterval       int              `json:"update_interval"`
-	WebhookPort          int              `json:"webhook_port"`
 	WelcomeStickerID     string           `json:"welcome_sticker_id"`
 	WelcomeEmbyPrompt    string           `json:"welcome_emby_prompt"`
 	WelcomeCodePrompt    string           `json:"welcome_code_prompt"`
@@ -82,6 +82,7 @@ func (ac *AppConfig) SaveConfig(filename string) error {
 		"bot_admins":         ac.Global.BotAdmins,
 		"db_path":            ac.Global.DBPath,
 		"tmdb_api_key":       ac.Global.TMDBAPIKey,
+		"webhook_port":       ac.Global.WebhookPort,
 		"groups":             ac.Groups,
 	}
 	data, err := json.MarshalIndent(raw, "", "  ")
@@ -114,6 +115,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 		BotAdmins        []int64         `json:"bot_admins"`
 		DBPath           string          `json:"db_path"`
 		TMDBAPIKey       string          `json:"tmdb_api_key"`
+		WebhookPort      int             `json:"webhook_port"`
 		Groups           json.RawMessage `json:"groups"`
 	}
 
@@ -130,6 +132,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 				"ai_temperature":     0.7,
 				"ai_max_context":     20,
 				"bot_admins":         []int64{},
+				"webhook_port":       8080,
 				"groups": []map[string]interface{}{
 					{
 						"telegram_chat_id":    -1000000000000,
@@ -139,7 +142,6 @@ func LoadConfig(filename string) (*AppConfig, error) {
 						"embyboss_api_token":  "",
 						"server_name":         "EMBY",
 						"update_interval":     60,
-						"webhook_port":        0,
 						"ai_enabled":          false,
 						"ai_trigger_keywords": []string{},
 						"ai_roles":            map[string]string{},
@@ -182,19 +184,10 @@ func LoadConfig(filename string) (*AppConfig, error) {
 	}
 
 	// 逐个校验 GroupConfig 并填充默认值
-	portMap := make(map[int]int) // webhook_port → 首次出现的群组索引
 	for i, g := range groups {
 		// 校验 telegram_chat_id 不为零值
 		if g.TelegramChatID == 0 {
 			return nil, fmt.Errorf("groups[%d] 缺少 telegram_chat_id 字段", i)
-		}
-
-		// 检测 webhook_port 冲突（仅非零端口）
-		if g.WebhookPort != 0 {
-			if prevIdx, exists := portMap[g.WebhookPort]; exists {
-				return nil, fmt.Errorf("webhook_port %d 冲突：groups[%d] 与 groups[%d] 使用了相同的端口", g.WebhookPort, prevIdx, i)
-			}
-			portMap[g.WebhookPort] = i
 		}
 
 		// 填充群组级默认值
@@ -233,6 +226,9 @@ func LoadConfig(filename string) (*AppConfig, error) {
 	if raw.AIMaxContext <= 0 {
 		raw.AIMaxContext = 20
 	}
+	if raw.WebhookPort <= 0 {
+		raw.WebhookPort = 8080
+	}
 
 	// 构建 AppConfig
 	appConfig := &AppConfig{
@@ -247,6 +243,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 			BotAdmins:        raw.BotAdmins,
 			DBPath:           raw.DBPath,
 			TMDBAPIKey:       raw.TMDBAPIKey,
+			WebhookPort:      raw.WebhookPort,
 		},
 		Groups: groups,
 	}

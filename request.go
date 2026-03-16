@@ -33,6 +33,7 @@ type RequestSession struct {
 	TMDBResult  *TMDBSearchResult  // 用户最终选定的 TMDB 条目
 	IsRemaster  bool               // 是否为洗版请求
 	Season      int                // 用户指定的季数（0 表示未指定）
+	MessageID   int                // 用户最初发起搜索的消息 ID，用于回复
 	State       RequestState       // 当前会话状态
 	CreatedAt   time.Time          // 会话创建时间
 	ExpiresAt   time.Time          // 会话超时时间（5分钟）
@@ -553,6 +554,7 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 		TMDBResults: results,
 		IsRemaster:  intent.IsRemaster,
 		Season:      intent.Season,
+		MessageID:   msg.MessageID,
 		State:       StateWaitConfirm,
 		CreatedAt:   time.Now(),
 		ExpiresAt:   time.Now().Add(sessionTimeout),
@@ -635,6 +637,9 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	// 查重拒绝：通知用户资源已存在
 	if !checkResult.Allowed {
 		reply := tgbotapi.NewMessage(cbData.ChatID, fmt.Sprintf("该资源已存在，无需重复求片。\n%s", checkResult.Reason))
+		if session.MessageID > 0 {
+			reply.ReplyToMessageID = session.MessageID
+		}
 		ch.bot.Send(reply)
 		rh.deleteSession(cbData.ChatID, cbData.UserID)
 		return
@@ -651,6 +656,9 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		if err != nil {
 			log.Printf("[求片] 货币余额查询失败 (user=%d): %v", cbData.UserID, err)
 			reply := tgbotapi.NewMessage(cbData.ChatID, fmt.Sprintf("%s余额查询失败，请稍后再试", currencyName))
+			if session.MessageID > 0 {
+				reply.ReplyToMessageID = session.MessageID
+			}
 			ch.bot.Send(reply)
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
@@ -660,6 +668,9 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 			reply := tgbotapi.NewMessage(cbData.ChatID, fmt.Sprintf(
 				"%s不足，当前余额 %d %s，求片需要 %d %s",
 				currencyName, balance, currencyName, group.RequestCoinCost, currencyName))
+			if session.MessageID > 0 {
+				reply.ReplyToMessageID = session.MessageID
+			}
 			ch.bot.Send(reply)
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
@@ -668,6 +679,9 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		if err := ebClient.DeductCoins(cbData.UserID, group.RequestCoinCost, "求片扣费"); err != nil {
 			log.Printf("[求片] 货币扣除失败 (user=%d, cost=%d): %v", cbData.UserID, group.RequestCoinCost, err)
 			reply := tgbotapi.NewMessage(cbData.ChatID, fmt.Sprintf("%s扣除失败，请稍后再试", currencyName))
+			if session.MessageID > 0 {
+				reply.ReplyToMessageID = session.MessageID
+			}
 			ch.bot.Send(reply)
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
@@ -697,12 +711,18 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		if err != nil {
 			log.Printf("[求片] 数据库去重检查失败: %v", err)
 			reply := tgbotapi.NewMessage(cbData.ChatID, "⚠️ 系统错误，请稍后再试")
+			if session.MessageID > 0 {
+				reply.ReplyToMessageID = session.MessageID
+			}
 			ch.bot.Send(reply)
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
 		}
 		if exists {
 			reply := tgbotapi.NewMessage(cbData.ChatID, "你已提交过该影视的求片请求，请耐心等待处理")
+			if session.MessageID > 0 {
+				reply.ReplyToMessageID = session.MessageID
+			}
 			ch.bot.Send(reply)
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
@@ -712,6 +732,7 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 			ChatID:     cbData.ChatID,
 			UserID:     cbData.UserID,
 			UserName:   session.UserName,
+			MessageID:  session.MessageID,
 			TMDBID:     selected.ID,
 			Title:      selected.GetDisplayTitle(),
 			MediaType:  selected.MediaType,
@@ -722,6 +743,9 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 		if err := rh.store.InsertRequest(record); err != nil {
 			log.Printf("[求片] 写入数据库失败: %v", err)
 			reply := tgbotapi.NewMessage(cbData.ChatID, "⚠️ 系统错误，请稍后再试")
+			if session.MessageID > 0 {
+				reply.ReplyToMessageID = session.MessageID
+			}
 			ch.bot.Send(reply)
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
@@ -752,6 +776,9 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	if len(admins) == 0 {
 		log.Printf("[求片] 警告：群组 %d 无可用管理员（request_admins 和 bot_admins 均为空）", cbData.ChatID)
 		reply := tgbotapi.NewMessage(cbData.ChatID, "当前无可用管理员处理求片请求")
+		if session.MessageID > 0 {
+			reply.ReplyToMessageID = session.MessageID
+		}
 		ch.bot.Send(reply)
 		rh.deleteSession(cbData.ChatID, cbData.UserID)
 		return
@@ -784,6 +811,9 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 	// 追加消费信息（扣费成功时展示消耗金额和余额）
 	replyText += deductionInfo
 	reply := tgbotapi.NewMessage(cbData.ChatID, replyText)
+	if session.MessageID > 0 {
+		reply.ReplyToMessageID = session.MessageID
+	}
 	ch.bot.Send(reply)
 
 	rh.deleteSession(cbData.ChatID, cbData.UserID)
@@ -1294,4 +1324,45 @@ func FormatRefundInfo(refunded int, balance int, currencyName string) string {
 		return fmt.Sprintf("\n\n💰 已退还 %d %s，当前余额 %d %s", refunded, currencyName, balance, currencyName)
 	}
 	return fmt.Sprintf("\n\n💰 已退还 %d %s", refunded, currencyName)
+}
+
+// HandleLibraryNewNotify 处理 Emby Webhook 的新入库通知
+func (rh *RequestHandler) HandleLibraryNewNotify(ch *ChatHandler, targetChatID int64, tmdbIDStr string) {
+	tmdbID, err := strconv.Atoi(tmdbIDStr)
+	if err != nil {
+		log.Printf("[求片] Webhook 入库通知的 TMDB ID 格式错误: %s", tmdbIDStr)
+		return
+	}
+
+	if rh.store == nil {
+		return
+	}
+
+	// 查找所有匹配该 tmdbID 的 approve 状态求片记录（如果 targetChatID != 0，则仅限该群组）
+	records, err := rh.store.GetApprovedRequestsByTMDB(tmdbID, targetChatID)
+	if err != nil {
+		log.Printf("[求片] 查询待入库求片记录失败: %v", err)
+		return
+	}
+
+	for _, rec := range records {
+		log.Printf("[求片] 影片入库，匹配到求片记录: user=%d, tmdb=%d, title=%s", rec.UserID, tmdbID, rec.Title)
+		
+		msgText := fmt.Sprintf("🎉 叮当！你求片的 [%s] 已经入库啦，快去看看吧！", rec.Title)
+		reply := tgbotapi.NewMessage(rec.ChatID, msgText)
+		
+		// 引用用户最初始的求片消息
+		if rec.MessageID > 0 {
+			reply.ReplyToMessageID = rec.MessageID
+		}
+
+		if _, err := ch.bot.Send(reply); err != nil {
+			log.Printf("[求片] 向用户 %d 发送入库通知失败: %v", rec.UserID, err)
+		}
+
+		// 更新记录状态为 fulfilled
+		if err := rh.store.UpdateStatus(rec.ID, "fulfilled"); err != nil {
+			log.Printf("[求片] 更新记录状态为 fulfilled 失败 (ID: %d): %v", rec.ID, err)
+		}
+	}
 }

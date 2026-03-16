@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -174,50 +173,7 @@ func (ch *ChatHandler) handleMyChatMember(update *tgbotapi.ChatMemberUpdated) {
 	}
 }
 
-// WebhookPayload 接收从 EmbyBoss 推送过来的建号通知
-type WebhookPayload struct {
-	TgID     int64  `json:"tg_id"`
-	TgName   string `json:"tg_name"`
-	EmbyName string `json:"emby_name"`
-}
 
-// StartGroupWebhook 为单个群组启动独立的 Webhook HTTP 服务
-// 每个群组使用独立端口和独立的 http.Server（不使用 DefaultServeMux）
-func (ch *ChatHandler) StartGroupWebhook(group *GroupConfig) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/webhook/new_user", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var payload WebhookPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, "Invalid payload", http.StatusBadRequest)
-			return
-		}
-
-		log.Printf("[Webhook] 群组 %d 收到新用户注册推送: TG ID=%d, TG Name=%s, Emby Name=%s",
-			group.TelegramChatID, payload.TgID, payload.TgName, payload.EmbyName)
-
-		// 异步处理新用户欢迎逻辑，传入具体群组配置
-		go ch.NotifyNewEmbyUser(group, payload.TgID, payload.TgName, payload.EmbyName)
-
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
-
-	addr := fmt.Sprintf("0.0.0.0:%d", group.WebhookPort)
-	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
-
-	log.Printf("[Webhook] 群组 %d 开始监听端口 %d 用于接收内部推送...", group.TelegramChatID, group.WebhookPort)
-	if err := server.ListenAndServe(); err != nil {
-		log.Printf("[Err] 群组 %d Webhook 服务启动失败 (端口 %d): %v", group.TelegramChatID, group.WebhookPort, err)
-	}
-}
 
 // NotifyNewEmbyUser 在发送贴纸并调用 AI 欢迎新主子/平民
 func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName string, embyName string) {

@@ -81,11 +81,9 @@ func main() {
 		// 在独立 goroutine 中启动消息监听
 		go chatHandler.StartListening()
 
-		// 为每个启用了 AI 且配置了 webhook_port 的群组启动独立 Webhook
-		for _, g := range appConfig.Groups {
-			if g.AIEnabled && g.WebhookPort > 0 {
-				go chatHandler.StartGroupWebhook(g)
-			}
+		// 启动全局统一的 Webhook 服务
+		if appConfig.Global.WebhookPort > 0 {
+			go StartGlobalWebhook(appConfig, chatHandler)
 		}
 
 		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", appConfig.Global.AIModel)

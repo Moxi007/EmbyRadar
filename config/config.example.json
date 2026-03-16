@@ -6,7 +6,9 @@
   "ai_max_tokens": 2000,
   "ai_temperature": 0.8,
   "ai_max_context": 20,
-  "bot_admins": [123456789],
+  "bot_admins": [
+    123456789
+  ],
   "tmdb_api_key": "YOUR_TMDB_API_KEY",
   "groups": [
     {
@@ -18,20 +20,25 @@
       "embyboss_currency_name": "",
       "server_name": "我的服务器",
       "update_interval": 60,
-      "webhook_port": 8889,
       "welcome_sticker_id": "",
       "welcome_emby_prompt": "这是系统通知：新用户 %s 刚刚开通了账号「%s」！请欢迎他。",
       "welcome_code_prompt": "这是系统通知：新用户 %s 刚刚使用注册码获得了入驻资格！请欢迎他。",
       "ai_enabled": true,
       "ai_search_enabled": true,
       "ai_system_prompt": "你是一个群聊助手，请保持回复简洁友好。",
-      "ai_trigger_keywords": ["助手", "机器人"],
+      "ai_trigger_keywords": [
+        "助手",
+        "机器人"
+      ],
       "ai_roles": {
         "123456789": "管理员"
       },
       "ai_knowledge_dir": "config/knowledge",
       "ai_emby_stats_format": "",
-      "request_admins": [111111111, 222222222],
+      "request_admins": [
+        111111111,
+        222222222
+      ],
       "request_enabled": false,
       "request_coin_cost": 0,
       "ai_image_enabled": false,

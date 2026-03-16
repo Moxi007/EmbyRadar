@@ -17,6 +17,7 @@ type RequestRecord struct {
 	ChatID      int64      // 群聊 ID
 	UserID      int64      // 请求者 Telegram ID
 	UserName    string     // 请求者显示名
+	MessageID   int        // 发起求片的原始消息 ID
 	TMDBID      int        // TMDB 条目 ID
 	Title       string     // 影视标题
 	MediaType   string     // "movie" 或 "tv"
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS requests (
     chat_id      INTEGER NOT NULL,
     user_id      INTEGER NOT NULL,
     user_name    TEXT    NOT NULL DEFAULT '',
+    message_id   INTEGER NOT NULL DEFAULT 0,
     tmdb_id      INTEGER NOT NULL,
     title        TEXT    NOT NULL DEFAULT '',
     media_type   TEXT    NOT NULL DEFAULT 'movie',
@@ -86,8 +88,9 @@ func NewRequestStore(dbPath string) (*RequestStore, error) {
 		return nil, fmt.Errorf("执行建表迁移失败: %w", err)
 	}
 
-	// 幂等迁移：为 requests 表添加 coin_cost 列（已存在则静默忽略）
+	// 幂等迁移：为 requests 表添加 coin_cost 和 message_id 列（已存在则静默忽略）
 	db.Exec(`ALTER TABLE requests ADD COLUMN coin_cost INTEGER NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE requests ADD COLUMN message_id INTEGER NOT NULL DEFAULT 0`)
 
 	return &RequestStore{db: db}, nil
 }
@@ -100,9 +103,9 @@ func (s *RequestStore) Close() error {
 // InsertRequest 插入一条新的求片记录，状态为 pending
 func (s *RequestStore) InsertRequest(r *RequestRecord) error {
 	result, err := s.db.Exec(
-		`INSERT INTO requests (chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, coin_cost)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-		r.ChatID, r.UserID, r.UserName, r.TMDBID, r.Title, r.MediaType, r.Year, boolToInt(r.IsRemaster), r.CoinCost,
+		`INSERT INTO requests (chat_id, user_id, user_name, message_id, tmdb_id, title, media_type, year, is_remaster, status, coin_cost)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+		r.ChatID, r.UserID, r.UserName, r.MessageID, r.TMDBID, r.Title, r.MediaType, r.Year, boolToInt(r.IsRemaster), r.CoinCost,
 	)
 	if err != nil {
 		return fmt.Errorf("插入求片记录失败: %w", err)
@@ -161,7 +164,7 @@ func (s *RequestStore) HasActiveRequest(chatID, userID int64, tmdbID int) (bool,
 // ListApproved 查询所有状态为 approved 的记录
 func (s *RequestStore) ListApproved() ([]*RequestRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
+		`SELECT id, chat_id, user_id, user_name, message_id, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
 		 FROM requests WHERE status = 'approved'`,
 	)
 	if err != nil {
@@ -171,11 +174,30 @@ func (s *RequestStore) ListApproved() ([]*RequestRecord, error) {
 	return scanRecords(rows)
 }
 
+// GetApprovedRequestsByTMDB 根据 TMDB ID 查询所有 approved 状态的记录
+func (s *RequestStore) GetApprovedRequestsByTMDB(tmdbID int, chatID int64) ([]*RequestRecord, error) {
+	query := `SELECT id, chat_id, user_id, user_name, message_id, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
+		 FROM requests WHERE status = 'approved' AND tmdb_id = ?`
+	args := []interface{}{tmdbID}
+
+	if chatID != 0 {
+		query += ` AND chat_id = ?`
+		args = append(args, chatID)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询指定 TMDB ID 的 approved 记录失败: %w", err)
+	}
+	defer rows.Close()
+	return scanRecords(rows)
+}
+
 // FindPendingRequest 根据群聊 ID、用户 ID 和 TMDB ID 查找 pending 状态的记录
 // 用于管理员审批时从回调数据定位对应的求片记录
 func (s *RequestStore) FindPendingRequest(chatID, userID int64, tmdbID int) (*RequestRecord, error) {
 	row := s.db.QueryRow(
-		`SELECT id, chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
+		`SELECT id, chat_id, user_id, user_name, message_id, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
 		 FROM requests WHERE chat_id = ? AND user_id = ? AND tmdb_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1`,
 		chatID, userID, tmdbID,
 	)
@@ -186,7 +208,7 @@ func (s *RequestStore) FindPendingRequest(chatID, userID int64, tmdbID int) (*Re
 	var approvedAt, fulfilledAt sql.NullString
 
 	err := row.Scan(
-		&r.ID, &r.ChatID, &r.UserID, &r.UserName, &r.TMDBID,
+		&r.ID, &r.ChatID, &r.UserID, &r.UserName, &r.MessageID, &r.TMDBID,
 		&r.Title, &r.MediaType, &r.Year, &isRemaster, &r.Status,
 		&r.CoinCost, &createdAt, &approvedAt, &fulfilledAt,
 	)
@@ -218,7 +240,7 @@ func (s *RequestStore) FindPendingRequest(chatID, userID int64, tmdbID int) (*Re
 // ListExpiredApproved 查询超过指定天数仍为 approved 的记录
 func (s *RequestStore) ListExpiredApproved(days int) ([]*RequestRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, chat_id, user_id, user_name, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
+		`SELECT id, chat_id, user_id, user_name, message_id, tmdb_id, title, media_type, year, is_remaster, status, coin_cost, created_at, approved_at, fulfilled_at
 		 FROM requests WHERE status = 'approved' AND approved_at <= datetime('now', ?)`,
 		fmt.Sprintf("-%d days", days),
 	)
@@ -239,7 +261,7 @@ func scanRecords(rows *sql.Rows) ([]*RequestRecord, error) {
 		var approvedAt, fulfilledAt sql.NullString
 
 		err := rows.Scan(
-			&r.ID, &r.ChatID, &r.UserID, &r.UserName, &r.TMDBID,
+			&r.ID, &r.ChatID, &r.UserID, &r.UserName, &r.MessageID, &r.TMDBID,
 			&r.Title, &r.MediaType, &r.Year, &isRemaster, &r.Status,
 			&r.CoinCost, &createdAt, &approvedAt, &fulfilledAt,
 		)
