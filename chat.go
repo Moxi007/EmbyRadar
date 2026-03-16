@@ -865,79 +865,9 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 	}
 
-	// === 动态按需查询 EmbyBoss API ===
+	// 取消之前硬编码的关键字前置拦截逻辑，不再自动为每一句聊天请求用户资产。
+	// 改为提供专属的 AI 工具 (get_user_info) 让 AI 在需要时自行发问。
 	var embyBossData string
-	keyWords := []string{"积分", "多少钱", "花币", "余额", "账号", "我的号", "封禁", "解封", "到期", "过期", "状态", "鸡蛋", "播放", "时长", "查一下", "看一下", "看看"}
-	needsQuery := false
-	lowerUserText := strings.ToLower(userText)
-	for _, kw := range keyWords {
-		if strings.Contains(lowerUserText, kw) {
-			needsQuery = true
-			break
-		}
-	}
-
-	if needsQuery && ch.ebMap[chatID] != nil {
-		// 优先判断：如果是回复了某人的消息并且在问"他/她"的信息，查被回复者
-		// 否则查发消息的人自己
-		queryID := senderID
-		queryLabel := "自己"
-
-		if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
-			askAboutOther := false
-			otherKeywords := []string{"他的", "她的", "他", "她", "这个人", "此人", "对方", "看一下", "看看", "查一下", "查查"}
-			for _, ok := range otherKeywords {
-				if strings.Contains(lowerUserText, ok) {
-					askAboutOther = true
-					break
-				}
-			}
-			myKeywords := []string{"我的", "我有", "我还"}
-			askAboutSelf := false
-			for _, mk := range myKeywords {
-				if strings.Contains(lowerUserText, mk) {
-					askAboutSelf = true
-					break
-				}
-			}
-
-			if !askAboutSelf || askAboutOther {
-				queryID = msg.ReplyToMessage.From.ID
-				replyName := msg.ReplyToMessage.From.FirstName
-				if msg.ReplyToMessage.From.LastName != "" {
-					replyName += " " + msg.ReplyToMessage.From.LastName
-				}
-				queryLabel = replyName
-			}
-		}
-
-		if queryID != 0 {
-			log.Printf("[AI] 检测到询问用户(%d: %s)的资产/状态，正在通过 API 请求 EmbyBoss...", queryID, queryLabel)
-			// 动态获取货币名称，优先使用 API 返回值，失败时回退到本地配置
-			currencyName := ch.getCurrencyName(chatID)
-			userInfoResp, err := ch.ebMap[chatID].GetUserInfo(queryID)
-			if err == nil && userInfoResp != nil {
-				if queryID == senderID {
-					embyBossData = userInfoResp.FormatForAI(currencyName)
-				} else {
-					embyBossData = fmt.Sprintf("【内部系统数据查询结果 - 查询对象: %s (TG ID: %d)】：该用户的系统绑定账号名为「%s」，目前的可用资产余额为 %d %s。其账号当前所处状态判定为「%s」，此账号的过期时间戳记录为 %s。请在回答时根据这些准确数据为其解答疑问，不可凭空捏造数据。注意：货币单位必须严格使用「%s」，禁止自行替换为其他名称。",
-						queryLabel, queryID, userInfoResp.Data.Name, userInfoResp.Data.Iv, currencyName,
-						func() string {
-							if userInfoResp.Data.Lv == "c" {
-								return "封禁状态(被禁止登录)"
-							}
-							return "正常"
-						}(),
-						userInfoResp.Data.Ex,
-						currencyName)
-				}
-				log.Printf("[AI] 成功获取用户 %d (%s) 最新数据注入上下文", queryID, queryLabel)
-			} else {
-				log.Printf("[AI] 获取用户信息失败或不存在: %v", err)
-				embyBossData = fmt.Sprintf("系统（EmbyBoss）中未查到 %s (TG ID: %d) 的任何绑定数据。可能该用户尚未在系统内注册/绑定TG，或该TG ID无对应Emby账号记录。", queryLabel, queryID)
-			}
-		}
-	}
 
 	// 构建消息列表，传入媒体内容（无媒体时 media 为 nil）
 	messages := ch.buildMessages(chatID, displayRole, verifiedRole, userText, embyBossData, media)
@@ -1082,7 +1012,24 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 				},
 			},
 		})
-		log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats)...")
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "get_user_info",
+				Description: "查询特定用户的 Emby 账号基础信息、VIP 状态等级、积分余额和账号过期时间等。当问及“我的账号”、“我有多少钱”、“他过期了吗”等涉及系统系统数据时必须调用。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"target_tg_id": map[string]any{
+							"type":        "integer",
+							"description": "需要查询的目标用户的 Telegram ID (如果没指定别人，默认查当前跟你对话的这个人的 ID)",
+						},
+					},
+					"required": []string{"target_tg_id"},
+				},
+			},
+		})
+		log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats, user_info)...")
 	}
 
 	// 循环处理 AI 的响应（支持多次连续工具调用）
@@ -1324,6 +1271,49 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 						}
 					} else {
 						toolResult = "未配置相关服务接口，功能受限。"
+					}
+					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
+				}
+				
+				// 处理 Emby 管家 - 查询用户基础资产与状态 (VIP、余额、过期时间等)
+				if tc.Function.Name == "get_user_info" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 get_user_info 参数失败: %v", err)
+						continue
+					}
+					
+					// 目标用户是谁？
+					targetTgID := msg.From.ID
+					if val, ok := args["target_tg_id"].(float64); ok && val > 0 {
+						targetTgID = int64(val)
+					}
+					
+					var toolResult string
+					if ebClient := ch.ebMap[chatID]; ebClient != nil {
+						userInfoResp, err := ebClient.GetUserInfo(targetTgID)
+						if err == nil && userInfoResp != nil && userInfoResp.Data.Tg.String() != "" {
+							log.Printf("[AI] 【触发私人资产探针】TGID: %d", targetTgID)
+							currencyName := ch.getCurrencyName(chatID)
+							if targetTgID == msg.From.ID {
+								toolResult = userInfoResp.FormatForAI(currencyName)
+							} else {
+								toolResult = fmt.Sprintf("【内部数据查询结果 - 对象TG ID: %d】：账号名「%s」，余额 %d %s，状态「%s」，过期时间戳: %s。货币须称「%s」。",
+									targetTgID, userInfoResp.Data.Name, userInfoResp.Data.Iv, currencyName,
+									func() string {
+										if userInfoResp.Data.Lv == "c" {
+											return "封禁状态(被禁止登录)"
+										}
+										return "正常"
+									}(),
+									userInfoResp.Data.Ex,
+									currencyName)
+							}
+						} else {
+							toolResult = fmt.Sprintf("无法获取目标TGID=%d 的 Emby 生效账号数据（未绑定或不存在）。", targetTgID)
+						}
+					} else {
+						toolResult = "未开启或未配置相关 EmbyBoss 服务接口，功能受限。"
 					}
 					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
 				}
