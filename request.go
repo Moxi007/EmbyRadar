@@ -456,39 +456,40 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 
 	// 检测豆瓣链接：https://movie.douban.com/subject/12345/
 	if doubanID := ParseDoubanURL(text); doubanID > 0 {
-		log.Printf("[求片] 检测到豆瓣链接，抓取标题: doubanID=%d", doubanID)
+		log.Printf("[求片] 检测到豆瓣链接，查询豆瓣API: doubanID=%d", doubanID)
 
 		// 通知用户正在处理
 		typingAction := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
 		ch.bot.Send(typingAction)
 
-		title, err := FetchDoubanTitle(doubanID)
+		doubanInfo, err := FetchDoubanInfo(doubanID)
 		if err != nil {
-			log.Printf("[求片] 抓取豆瓣标题失败: %v", err)
-			reply := tgbotapi.NewMessage(chatID, "⚠️ 无法获取该豆瓣链接对应的影视名称，请直接输入片名重试")
+			log.Printf("[求片] 豆瓣API查询失败: %v", err)
+			reply := tgbotapi.NewMessage(chatID, "⚠️ 无法获取该豆瓣链接对应的影视信息，请直接输入片名重试")
 			reply.ReplyToMessageID = msg.MessageID
 			ch.bot.Send(reply)
 			return
 		}
 
-		log.Printf("[求片] 豆瓣标题: %s，使用标题搜索 TMDB", title)
+		log.Printf("[求片] 豆瓣信息: 标题=%s, 评分=%s, 类型=%s, 年份=%s", doubanInfo.Title, doubanInfo.Rating, doubanInfo.MediaType, doubanInfo.Year)
 
 		// 从豆瓣标题中剥离季数信息
-		cleanName, regexSeason := stripSeasonFromName(title)
+		cleanName, regexSeason := stripSeasonFromName(doubanInfo.Title)
 		if regexSeason > 0 {
 			season = regexSeason
 		}
 
-		searchResults, err := tmdbClient.SearchMulti(cleanName, "")
+		// 使用豆瓣返回的 mediaType 精确搜索 TMDB
+		searchResults, err := tmdbClient.SearchMulti(cleanName, doubanInfo.MediaType)
 		if err != nil {
 			log.Printf("[求片] 使用豆瓣标题搜索 TMDB 失败: %v", err)
-			reply := tgbotapi.NewMessage(chatID, fmt.Sprintf("⚠️ 已识别影片「%s」，但 TMDB 搜索失败，请稍后再试", title))
+			reply := tgbotapi.NewMessage(chatID, fmt.Sprintf("⚠️ 已识别影片「%s」，但 TMDB 搜索失败，请稍后再试", doubanInfo.Title))
 			reply.ReplyToMessageID = msg.MessageID
 			ch.bot.Send(reply)
 			return
 		}
 		if len(searchResults) == 0 {
-			reply := tgbotapi.NewMessage(chatID, fmt.Sprintf("已识别影片「%s」，但在 TMDB 中未找到对应条目，请尝试直接输入片名", title))
+			reply := tgbotapi.NewMessage(chatID, fmt.Sprintf("已识别影片「%s」，但在 TMDB 中未找到对应条目，请尝试直接输入片名", doubanInfo.Title))
 			reply.ReplyToMessageID = msg.MessageID
 			ch.bot.Send(reply)
 			return

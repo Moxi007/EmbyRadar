@@ -913,9 +913,9 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			Type: "function",
 			Function: &ToolFunction{
 				Name:        "search_tmdb",
-				Description: "搜索 TMDB（The Movie Database）获取电影或电视剧的详细信息，包括评分、简介、上映日期等。当用户询问影视相关问题时使用此工具。" +
-					"在回复中引用影视信息时，你必须原样使用搜索结果中提供的完整 TMDB 链接（格式为 https://www.themoviedb.org/...），绝对不能自行拼凑或修改链接中的任何部分。" +
-					"当需要向用户展示影视评分时，应优先通过 search_web 工具搜索该影片的豆瓣评分，用豆瓣评分替代 TMDB 评分展示给用户。",
+				Description: "搜索 TMDB（The Movie Database）获取电影或电视剧的详细信息，包括简介、上映日期等。当用户询问影视相关问题时使用此工具。" +
+					"⚠️在回复中引用影视信息时，你必须原样使用搜索结果中提供的完整 TMDB 链接（格式为 https://www.themoviedb.org/...），绝对不能自行拼凑或修改链接中的任何部分。" +
+					"⚠️关于评分和评价：给用户展示评分时，必须【只提供豆瓣评分】（通过 search_web 工具搜索获取），只有在确实找不到豆瓣评分的情况下，才允许给出 TMDB 或 IMDb 等其他评分。评价一部影片时，绝对不能仅仅根据 TMDB 简介进行评价，你必须通过 search_web 工具搜索网上的真实影评和口碑，综合真实观众的评价来给出结论。",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{

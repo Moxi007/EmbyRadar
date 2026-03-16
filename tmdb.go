@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -223,54 +222,101 @@ func ParseDoubanURL(text string) int {
 	return id
 }
 
-// FetchDoubanTitle 通过 HTTP 抓取豆瓣影视页面的标题
-// 从 <title> 标签中提取影视名称，用于后续 TMDB 搜索
-func FetchDoubanTitle(doubanID int) (string, error) {
-	pageURL := fmt.Sprintf("https://movie.douban.com/subject/%d/", doubanID)
+// DoubanInfo 从豆瓣 API 获取的影片信息
+type DoubanInfo struct {
+	Title     string // 影片标题
+	Rating    string // 豆瓣评分（如 "7.0"），暂无评分时为空
+	MediaType string // "movie" 或 "tv"（基于 is_tv 字段推断）
+	Year      string // 上映年份
+	DoubanID  string // 豆瓣 ID
+}
 
-	req, err := http.NewRequest("GET", pageURL, nil)
+// doubanAbstractResponse 豆瓣 j/subject_abstract API 响应结构
+type doubanAbstractResponse struct {
+	R       int `json:"r"`
+	Subject struct {
+		Title       string `json:"title"`
+		Rate        string `json:"rate"`
+		IsTV        bool   `json:"is_tv"`
+		ReleaseYear string `json:"release_year"`
+		ID          string `json:"id"`
+	} `json:"subject"`
+}
+
+// FetchDoubanInfo 通过豆瓣 j/subject_abstract JSON API 获取影片信息
+// 返回标题、评分、类型等结构化数据，用于后续 TMDB 搜索和评分展示
+func FetchDoubanInfo(doubanID int) (*DoubanInfo, error) {
+	apiURL := fmt.Sprintf("https://movie.douban.com/j/subject_abstract?subject_id=%d", doubanID)
+
+	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("创建豆瓣请求失败: %w", err)
+		return nil, fmt.Errorf("创建豆瓣请求失败: %w", err)
 	}
-	// 设置 User-Agent 避免被反爬拦截
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+	req.Header.Set("Referer", "https://movie.douban.com/")
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("请求豆瓣页面失败: %w", err)
+		return nil, fmt.Errorf("请求豆瓣 API 失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("豆瓣页面响应非 200: %d", resp.StatusCode)
+		return nil, fmt.Errorf("豆瓣 API 响应非 200: %d", resp.StatusCode)
 	}
 
-	// 只读取前 64KB，避免全量加载页面
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return "", fmt.Errorf("读取豆瓣页面失败: %w", err)
+	var apiResp doubanAbstractResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("解析豆瓣 API 响应失败: %w", err)
 	}
 
-	// 从 HTML 中提取 <title> 标签内容
-	// 豆瓣 title 格式通常为："影视名称 (豆瓣)" 或 "影视名称 第X季 (豆瓣)"
-	reTitle := regexp.MustCompile(`<title[^>]*>([^<]+)</title>`)
-	titleMatch := reTitle.FindSubmatch(body)
-	if len(titleMatch) < 2 {
-		return "", fmt.Errorf("未找到豆瓣页面标题")
+	if apiResp.Subject.Title == "" {
+		return nil, fmt.Errorf("豆瓣 API 返回的标题为空")
 	}
 
-	title := strings.TrimSpace(string(titleMatch[1]))
-	// 移除 " (豆瓣)" 后缀
-	title = strings.TrimSuffix(title, " (豆瓣)")
+	// 提取纯标题：豆瓣 title 格式为 "影片名 英文名‎ (年份)"，需要清理
+	title := apiResp.Subject.Title
+	// 移除末尾的 "(年份)" 部分，保留纯影片名
+	if idx := strings.LastIndex(title, " ("); idx > 0 {
+		title = strings.TrimSpace(title[:idx])
+	}
+	// 移除中间可能的 Unicode 控制字符（如 \u200e 左至右标记）
+	title = strings.Map(func(r rune) rune {
+		if r < 32 || r == 0x200e || r == 0x200f {
+			return -1
+		}
+		return r
+	}, title)
 	title = strings.TrimSpace(title)
 
-	if title == "" {
-		return "", fmt.Errorf("豆瓣页面标题为空")
+	// 如果标题中包含中英文双标题（空格分隔），取第一个中文部分用于搜索
+	// 例如 "洛杉矶劫案 Crime 101" → "洛杉矶劫案"
+	// 但也可能全中文或全英文，所以保持原标题不截断
+	mediaType := "movie"
+	if apiResp.Subject.IsTV {
+		mediaType = "tv"
 	}
 
-	return title, nil
+	return &DoubanInfo{
+		Title:     title,
+		Rating:    apiResp.Subject.Rate,
+		MediaType: mediaType,
+		Year:      apiResp.Subject.ReleaseYear,
+		DoubanID:  apiResp.Subject.ID,
+	}, nil
 }
+
+// FetchDoubanTitle 兼容包装：通过豆瓣 API 获取影片标题
+// 内部调用 FetchDoubanInfo，仅返回标题
+func FetchDoubanTitle(doubanID int) (string, error) {
+	info, err := FetchDoubanInfo(doubanID)
+	if err != nil {
+		return "", err
+	}
+	return info.Title, nil
+}
+
 
 // FormatTMDBResultsForAI 将搜索结果格式化为 AI 可读的文本
 // 每条结果包含序号、标题、年份、评分、简介和 TMDB 链接
