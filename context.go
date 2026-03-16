@@ -15,7 +15,8 @@ type ContextManager struct {
 
 // ChatContext 表示单个群聊的对话上下文
 type ChatContext struct {
-	Messages   []ChatMessage // 历史消息列表
+	Messages   []ChatMessage // 历史消息列表 (受最大轮数控制，用于即时对话)
+	DailyLog   []ChatMessage // 每日对话日志（完整记录，用于 AI 的每日摘要沉淀）
 	LastActive time.Time     // 最后活跃时间
 }
 
@@ -43,11 +44,16 @@ func (cm *ContextManager) AddMessage(chatID int64, msg ChatMessage) {
 	if !ok {
 		ctx = &ChatContext{
 			Messages: make([]ChatMessage, 0),
+			DailyLog: make([]ChatMessage, 0),
 		}
 		cm.contexts[chatID] = ctx
 	}
 
 	ctx.Messages = append(ctx.Messages, msg)
+	
+	// 同时存入 DailyLog，过滤掉太长的媒体数据（实际上外层调用时已对图片等转为短文本描述）
+	ctx.DailyLog = append(ctx.DailyLog, msg)
+	
 	ctx.LastActive = time.Now()
 
 	// 超出最大轮数时，丢弃最早的消息（每轮 = 一问一答 = 2 条消息）
@@ -82,7 +88,28 @@ func (cm *ContextManager) GetMessages(chatID int64) []ChatMessage {
 func (cm *ContextManager) ClearContext(chatID int64) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	delete(cm.contexts, chatID)
+	// 注意：只清空短期记忆，不清空每日日志（DailyLog 由摘要定时器清空）
+	if ctx, ok := cm.contexts[chatID]; ok {
+		ctx.Messages = make([]ChatMessage, 0)
+	}
+}
+
+// ExtractAndClearDailyLog 提取并清空指定群聊的每日对话日志
+func (cm *ContextManager) ExtractAndClearDailyLog(chatID int64) []ChatMessage {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	ctx, ok := cm.contexts[chatID]
+	if !ok || len(ctx.DailyLog) == 0 {
+		return nil
+	}
+
+	result := make([]ChatMessage, len(ctx.DailyLog))
+	copy(result, ctx.DailyLog)
+	
+	// 清空日志，准备开启新的一天
+	ctx.DailyLog = make([]ChatMessage, 0)
+	return result
 }
 
 // cleanupLoop 定期清理超时的上下文
@@ -94,7 +121,13 @@ func (cm *ContextManager) cleanupLoop() {
 		cm.mu.Lock()
 		for chatID, ctx := range cm.contexts {
 			if time.Since(ctx.LastActive) > cm.timeout {
-				delete(cm.contexts, chatID)
+				// 仅清空即时短期记忆，保留 DailyLog 避免丢失
+				ctx.Messages = make([]ChatMessage, 0)
+				
+				// 如果 DailyLog 也是空的，证明不仅超时还没留存实质对话，可整体释放
+				if len(ctx.DailyLog) == 0 {
+					delete(cm.contexts, chatID)
+				}
 			}
 		}
 		cm.mu.Unlock()

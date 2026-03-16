@@ -4,13 +4,21 @@
   "ai_api_key": "YOUR_AI_API_KEY",
   "ai_model": "gemini-3-flash-preview",
   "ai_max_tokens": 2000,
-  "ai_temperature": 0.8,
+  "ai_temperature": 0.7,
   "ai_max_context": 20,
   "bot_admins": [
     123456789
   ],
-  "tmdb_api_key": "YOUR_TMDB_API_KEY",
+  "db_path": "config/embyradar.db",
+  "tmdb_api_key": "YOUR_TMDB_API_KEY_HERE",
   "webhook_port": 8080,
+  "digest_enabled": true,
+  "digest_hour": 3,
+  "qdrant_url": "",
+  "embedding_api_url": "",
+  "embedding_api_key": "",
+  "embedding_model": "",
+  "memory_top_k": 5,
   "groups": [
     {
       "telegram_chat_id": -100123456789,

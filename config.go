@@ -28,6 +28,15 @@ type GlobalConfig struct {
 	DBPath           string  `json:"db_path"`      // SQLite 数据库路径，默认 config/embyradar.db
 	TMDBAPIKey       string  `json:"tmdb_api_key"` // TMDB API 密钥，为空时禁用 TMDB 相关功能
 	WebhookPort      int     `json:"webhook_port"` // 全局 Webhook 端口
+	
+	// AI 记忆系统配置
+	DigestEnabled    bool    `json:"digest_enabled"`    // 是否开启每日对话摘要（方案四）
+	DigestHour       int     `json:"digest_hour"`       // 每日执行摘要的小时（0-23），默认 3 (凌晨3点)
+	QdrantURL        string  `json:"qdrant_url"`        // Qdrant 数据库 HTTP 地址，为空则禁用向量记忆
+	EmbeddingAPIURL  string  `json:"embedding_api_url"` // 独立的 Embedding API 地址 (例如硅基流动)
+	EmbeddingAPIKey  string  `json:"embedding_api_key"` // Embedding API 密钥
+	EmbeddingModel   string  `json:"embedding_model"`   // Embedding 模型名称
+	MemoryTopK       int     `json:"memory_top_k"`      // 检索的记忆条数，默认 5
 }
 
 // GroupConfig 群组级独立配置，每个 Telegram 群组一份
@@ -83,6 +92,13 @@ func (ac *AppConfig) SaveConfig(filename string) error {
 		"db_path":            ac.Global.DBPath,
 		"tmdb_api_key":       ac.Global.TMDBAPIKey,
 		"webhook_port":       ac.Global.WebhookPort,
+		"digest_enabled":     ac.Global.DigestEnabled,
+		"digest_hour":        ac.Global.DigestHour,
+		"qdrant_url":         ac.Global.QdrantURL,
+		"embedding_api_url":  ac.Global.EmbeddingAPIURL,
+		"embedding_api_key":  ac.Global.EmbeddingAPIKey,
+		"embedding_model":    ac.Global.EmbeddingModel,
+		"memory_top_k":       ac.Global.MemoryTopK,
 		"groups":             ac.Groups,
 	}
 	data, err := json.MarshalIndent(raw, "", "  ")
@@ -116,6 +132,13 @@ func LoadConfig(filename string) (*AppConfig, error) {
 		DBPath           string          `json:"db_path"`
 		TMDBAPIKey       string          `json:"tmdb_api_key"`
 		WebhookPort      int             `json:"webhook_port"`
+		DigestEnabled    bool            `json:"digest_enabled"`
+		DigestHour       int             `json:"digest_hour"`
+		QdrantURL        string          `json:"qdrant_url"`
+		EmbeddingAPIURL  string          `json:"embedding_api_url"`
+		EmbeddingAPIKey  string          `json:"embedding_api_key"`
+		EmbeddingModel   string          `json:"embedding_model"`
+		MemoryTopK       int             `json:"memory_top_k"`
 		Groups           json.RawMessage `json:"groups"`
 	}
 
@@ -133,6 +156,13 @@ func LoadConfig(filename string) (*AppConfig, error) {
 				"ai_max_context":     20,
 				"bot_admins":         []int64{},
 				"webhook_port":       8080,
+				"digest_enabled":     true,
+				"digest_hour":        3,
+				"qdrant_url":         "",
+				"embedding_api_url":  "",
+				"embedding_api_key":  "",
+				"embedding_model":    "",
+				"memory_top_k":       5,
 				"groups": []map[string]interface{}{
 					{
 						"telegram_chat_id":    -1000000000000,
@@ -229,6 +259,13 @@ func LoadConfig(filename string) (*AppConfig, error) {
 	if raw.WebhookPort <= 0 {
 		raw.WebhookPort = 8080
 	}
+	if raw.MemoryTopK <= 0 {
+		raw.MemoryTopK = 5
+	}
+	// 如果配置了 DigestHour 但超出了 0-23 的范围，则重置为凌晨 3 点
+	if raw.DigestHour < 0 || raw.DigestHour > 23 {
+		raw.DigestHour = 3
+	}
 
 	// 构建 AppConfig
 	appConfig := &AppConfig{
@@ -244,6 +281,13 @@ func LoadConfig(filename string) (*AppConfig, error) {
 			DBPath:           raw.DBPath,
 			TMDBAPIKey:       raw.TMDBAPIKey,
 			WebhookPort:      raw.WebhookPort,
+			DigestEnabled:    raw.DigestEnabled,
+			DigestHour:       raw.DigestHour,
+			QdrantURL:        raw.QdrantURL,
+			EmbeddingAPIURL:  raw.EmbeddingAPIURL,
+			EmbeddingAPIKey:  raw.EmbeddingAPIKey,
+			EmbeddingModel:   raw.EmbeddingModel,
+			MemoryTopK:       raw.MemoryTopK,
 		},
 		Groups: groups,
 	}

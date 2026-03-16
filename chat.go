@@ -25,6 +25,7 @@ type ChatHandler struct {
 	ebMap          map[int64]*EmbyBossClient // chatID → 独立 EmbyBoss 客户端
 	tmdbMap        map[int64]*TMDBClient     // chatID → 独立 TMDB 客户端
 	requestHandler *RequestHandler           // 全局求片处理器
+	memoryStore    *MemoryStore              // 向量记忆存储 (可为 nil)
 }
 
 // NewChatHandler 创建聊天处理器，遍历所有群组配置初始化各群组的独立客户端
@@ -76,6 +77,11 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 	}
 
 	return ch
+}
+
+// SetMemoryStore 注入全局向量记忆存储
+func (ch *ChatHandler) SetMemoryStore(store *MemoryStore) {
+	ch.memoryStore = store
 }
 
 // getCurrencyName 获取群组配置的货币名称
@@ -1184,6 +1190,21 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		Content: MessageContent{Text: reply},
 	})
 
+	// ====== [方案三：长期记忆异步归档] ======
+	if ch.memoryStore != nil {
+		go func(cid int64, cUserText, cReply string) {
+			// 将这一轮完整的用户问题与 AI 回答应答拼合为一条完整的语义记忆
+			memText := fmt.Sprintf("用户说: %s\nAI回答: %s", cUserText, cReply)
+			metadata := map[string]any{
+				"timestamp": time.Now().Format(time.RFC3339),
+				"user_name": userName,
+			}
+			if err := ch.memoryStore.Store(cid, memText, metadata); err != nil {
+				log.Printf("[记忆] 长期记忆写入 Qdrant 失败: %v", err)
+			}
+		}(chatID, contextUserText, reply)
+	}
+
 	// 发送回复：检测 AI 回复中是否包含求片确认标记
 	requestConfirmRe := regexp.MustCompile(`\[REQUEST_CONFIRM:(.+?)\]`)
 	if matches := requestConfirmRe.FindStringSubmatch(reply); len(matches) == 2 {
@@ -1259,6 +1280,17 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 		kbContent := kb.GetContent()
 		if kbContent != "" {
 			systemPrompt += "\n\n" + kbContent
+		}
+	}
+
+	// 注入长期记忆 (方案三：语义搜索)
+	if ch.memoryStore != nil && userText != "" {
+		memories, err := ch.memoryStore.Search(chatID, userText, ch.appConfig.Global.MemoryTopK)
+		if err == nil && len(memories) > 0 {
+			systemPrompt += "\n\n[模糊记忆回忆]：以下是你从之前的过往交流中回想起来的相似片段（这可能会帮你想起相关语境）：\n"
+			for i, mem := range memories {
+				systemPrompt += fmt.Sprintf("%d. (来自 %s 于 %s 的记录): %s\n", i+1, mem.UserName, mem.Timestamp, mem.Text)
+			}
 		}
 	}
 

@@ -11,3 +11,15 @@ services:
       - ./config:/app/config
       # 挂载 logs 目录，持久化日志文件
       - ./logs:/app/logs
+
+  # ====== [方案三可选] Qdrant 向量数据库 ======
+  # 用于为 EmbyRadar 提供 AI 的长久混合记忆功能
+  # 开启前提：在 config.json 中配置 "qdrant_url" 并填入 "embedding_api_url" 等参数
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./qdrant_data:/qdrant/storage

@@ -74,6 +74,18 @@ func main() {
 
 		chatHandler := NewChatHandler(bot, aiClient, ctxManager, appConfig, requestHandler)
 
+		// --------- [方案三] 向量记忆引擎 ---------
+		if appConfig.Global.QdrantURL != "" {
+			memoryStore := NewMemoryStore(&appConfig.Global)
+			if err := memoryStore.EnsureCollection(); err != nil {
+				log.Printf("[记忆] Qdrant 向量数据库连接或初始化失败: %v (向量记忆功能已降级关闭)", err)
+			} else {
+				log.Printf("[记忆] 向量库已连接 (Qdrant: %s, TopK: %d)", appConfig.Global.QdrantURL, appConfig.Global.MemoryTopK)
+				chatHandler.SetMemoryStore(memoryStore)
+			}
+		}
+		// ----------------------------------------
+
 		// 创建 Poller 轮询器并启动（复用 chatHandler 的 embyMap）
 		poller := NewPoller(store, chatHandler.embyMap, bot, 30*time.Minute)
 		poller.Start()
@@ -84,6 +96,15 @@ func main() {
 		// 启动全局统一的 Webhook 服务
 		if appConfig.Global.WebhookPort > 0 {
 			go StartGlobalWebhook(appConfig, chatHandler)
+		}
+
+		// 启动每日摘要调度器（方案四长久记忆核心）
+		var digestScheduler *DigestScheduler
+		if appConfig.Global.DigestEnabled {
+			digestScheduler = NewDigestScheduler(aiClient, ctxManager, appConfig)
+			if digestScheduler != nil {
+				digestScheduler.Start()
+			}
 		}
 
 		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", appConfig.Global.AIModel)
@@ -100,6 +121,9 @@ func main() {
 
 		sig := <-sigCh
 		log.Printf("收到退出信号 %v，正在优雅退出...", sig)
+		if digestScheduler != nil {
+			digestScheduler.Stop()
+		}
 		poller.Stop()
 		store.Close()
 		log.Printf("数据库和轮询器已关闭，程序退出")
