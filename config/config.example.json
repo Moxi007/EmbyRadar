@@ -26,7 +26,7 @@
       "emby_api_key": "YOUR_EMBY_API_KEY",
       "embyboss_api_url": "http://127.0.0.1:7738",
       "embyboss_api_token": "YOUR_EMBYBOSS_API_TOKEN",
-      "embyboss_currency_name": "鸡蛋",
+      "embyboss_currency_name": "",
       "server_name": "我的服务器",
       "update_interval": 60,
       "welcome_sticker_id": "",
