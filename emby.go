@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -287,8 +288,11 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 		days = 1 // 默认至少查 1 天（最近 24 小时）
 	}
 	
-	// 为了兼容 Emby Boss 脱掉连字符的 UUID，我们使用 REPLACE 函数直接匹配
-	queryStr := fmt.Sprintf("SELECT ItemName, PlaybackDuration, IpAddress, DeviceName FROM PlaybackActivity WHERE REPLACE(UserId, '-', '') = '%s' AND DateCreated >= datetime('now', '-%d days') ORDER BY DateCreated DESC LIMIT 300", embyUserID, days)
+	// 转成纯小写确保万无一失
+	targetID := strings.ToLower(embyUserID)
+	
+	// 为了兼容大小写差异以及 Emby Boss 脱掉连字符的 UUID，我们使用 LOWER 和 REPLACE 函数直接匹配
+	queryStr := fmt.Sprintf("SELECT ItemName, PlaybackDuration, IpAddress, DeviceName, DateCreated FROM PlaybackActivity WHERE LOWER(REPLACE(UserId, '-', '')) = '%s' ORDER BY DateCreated DESC LIMIT 500", targetID)
 	
 	payload := playbackReportingCustomQueryReq{
 		CustomQueryString: queryStr,
@@ -322,6 +326,15 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 		return nil, fmt.Errorf("解析结果失败: %w", err)
 	}
 	
+	// 构造允许命中的日期字符串前缀（兼容本地和 UTC 差异）
+	validDays := make(map[string]bool)
+	now := time.Now()
+	for i := 0; i <= days+1; i++ {
+		d := now.AddDate(0, 0, -i)
+		validDays[d.Format("2006-01-02")] = true
+		validDays[d.UTC().Format("2006-01-02")] = true
+	}
+
 	ipMap := make(map[string]bool)
 	deviceMap := make(map[string]bool)
 	itemMap := make(map[string]bool)
@@ -330,7 +343,16 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 	var items []string
 	
 	for _, row := range pbResult.Results {
-		if len(row) >= 4 {
+		if len(row) >= 5 {
+			dateStr := row[4]
+			// 在 Go 代码级别进行防御性过滤，只要日期前缀(如 2026-03-16) 不在查询范围内，直接丢弃
+			if len(dateStr) >= 10 {
+				prefix := dateStr[:10]
+				if !validDays[prefix] {
+					continue
+				}
+			}
+
 			itemName := row[0]
 			playDurationStr := row[1]
 			ip := row[2]
