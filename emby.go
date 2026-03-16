@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -294,6 +296,8 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 	// 为了兼容大小写差异以及 Emby Boss 脱掉连字符的 UUID，我们使用 LOWER 和 REPLACE 函数直接匹配
 	queryStr := fmt.Sprintf("SELECT ItemName, PlaybackDuration, IpAddress, DeviceName, DateCreated FROM PlaybackActivity WHERE LOWER(REPLACE(UserId, '-', '')) = '%s' ORDER BY DateCreated DESC LIMIT 500", targetID)
 	
+	log.Printf("[PlaybackReporting] 发送SQL: %s", queryStr)
+	
 	payload := playbackReportingCustomQueryReq{
 		CustomQueryString: queryStr,
 		ReplaceUserId:     false,
@@ -305,6 +309,7 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 	}
 	
 	reqURL := fmt.Sprintf("%s/user_usage_stats/submit_custom_query?api_key=%s", ec.URL, ec.APIKey)
+	log.Printf("[PlaybackReporting] 请求URL: %s", reqURL)
 	req, err := http.NewRequest("POST", reqURL, bytes.NewBuffer(bodyData))
 	if err != nil {
 		return nil, fmt.Errorf("构建请求失败: %w", err)
@@ -321,10 +326,25 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 		return nil, fmt.Errorf("Playback Reporting API 错误，可能未安装该插件: %d", resp.StatusCode)
 	}
 	
+	// 先读取原始响应体用于调试日志
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应体失败: %w", err)
+	}
+	
+	// 打印原始响应（截断到前 2000 字符，防止日志爆炸）
+	rawStr := string(rawBody)
+	if len(rawStr) > 2000 {
+		rawStr = rawStr[:2000] + "...(已截断)"
+	}
+	log.Printf("[PlaybackReporting] 原始响应(%d字节): %s", len(rawBody), rawStr)
+	
 	var pbResult playbackReportingQueryResult
-	if err := json.NewDecoder(resp.Body).Decode(&pbResult); err != nil {
+	if err := json.Unmarshal(rawBody, &pbResult); err != nil {
 		return nil, fmt.Errorf("解析结果失败: %w", err)
 	}
+	
+	log.Printf("[PlaybackReporting] 解析完成: columns=%v, colums=%v, 结果行数=%d", pbResult.Columns, pbResult.Colums, len(pbResult.Results))
 	
 	// 构造允许命中的日期字符串前缀（兼容本地和 UTC 差异）
 	validDays := make(map[string]bool)
