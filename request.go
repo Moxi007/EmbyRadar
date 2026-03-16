@@ -1358,8 +1358,12 @@ func (rh *RequestHandler) HandleLibraryNewNotify(ch *ChatHandler, targetChatID i
 	for _, rec := range records {
 		log.Printf("[求片] 影片入库，匹配到求片记录: user=%d, tmdb=%d, title=%s", rec.UserID, tmdbID, rec.Title)
 		
-		msgText := fmt.Sprintf("🎉 叮当！你求片的 [%s] 已经入库啦，快去看看吧！", rec.Title)
+		tmdbLink := fmt.Sprintf("https://www.themoviedb.org/%s/%d", rec.MediaType, tmdbID)
+		userMention := fmt.Sprintf("[%s](tg://user?id=%d)", cleanMarkdownName(rec.UserName), rec.UserID)
+		msgText := fmt.Sprintf("🎉 叮当！%s，你求片的 [%s](%s) 已经入库啦，快去看看吧！", userMention, cleanMarkdownName(rec.Title), tmdbLink)
+		
 		reply := tgbotapi.NewMessage(rec.ChatID, msgText)
+		reply.ParseMode = "Markdown"
 		
 		// 引用用户最初始的求片消息
 		if rec.MessageID > 0 {
