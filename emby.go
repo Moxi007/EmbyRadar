@@ -287,14 +287,13 @@ type playbackReportingQueryResult struct {
 // 使用 Playback Reporting 插件的 SQL 拉取指定天数内的数据，整合出时长、内容、IP和设备。
 func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int) (*UserPlaybackReporting, error) {
 	if days <= 0 {
-		days = 1 // 默认至少查 1 天（最近 24 小时）
+		days = 1
 	}
 	
-	// 转成纯小写确保万无一失
 	targetID := strings.ToLower(embyUserID)
 	
-	// 为了兼容大小写差异以及 Emby Boss 脱掉连字符的 UUID，我们使用 LOWER 和 REPLACE 函数直接匹配
-	queryStr := fmt.Sprintf("SELECT ItemName, PlaybackDuration, IpAddress, DeviceName, DateCreated FROM PlaybackActivity WHERE LOWER(REPLACE(UserId, '-', '')) = '%s' ORDER BY DateCreated DESC LIMIT 500", targetID)
+	// 使用 SELECT * 获取所有列，避免因列名猜测错误导致 SQL 报错
+	queryStr := fmt.Sprintf("SELECT * FROM PlaybackActivity WHERE LOWER(REPLACE(UserId, '-', '')) = '%s' ORDER BY DateCreated DESC LIMIT 500", targetID)
 	
 	log.Printf("[PlaybackReporting] 发送SQL: %s", queryStr)
 	
@@ -309,7 +308,6 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 	}
 	
 	reqURL := fmt.Sprintf("%s/user_usage_stats/submit_custom_query?api_key=%s", ec.URL, ec.APIKey)
-	log.Printf("[PlaybackReporting] 请求URL: %s", reqURL)
 	req, err := http.NewRequest("POST", reqURL, bytes.NewBuffer(bodyData))
 	if err != nil {
 		return nil, fmt.Errorf("构建请求失败: %w", err)
@@ -326,13 +324,11 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 		return nil, fmt.Errorf("Playback Reporting API 错误，可能未安装该插件: %d", resp.StatusCode)
 	}
 	
-	// 先读取原始响应体用于调试日志
 	rawBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应体失败: %w", err)
 	}
 	
-	// 打印原始响应（截断到前 2000 字符，防止日志爆炸）
 	rawStr := string(rawBody)
 	if len(rawStr) > 2000 {
 		rawStr = rawStr[:2000] + "...(已截断)"
@@ -344,7 +340,37 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 		return nil, fmt.Errorf("解析结果失败: %w", err)
 	}
 	
-	log.Printf("[PlaybackReporting] 解析完成: columns=%v, colums=%v, 结果行数=%d", pbResult.Columns, pbResult.Colums, len(pbResult.Results))
+	// 合并 columns 和 colums 兼容插件拼写
+	allCols := pbResult.Columns
+	if len(allCols) == 0 {
+		allCols = pbResult.Colums
+	}
+	
+	log.Printf("[PlaybackReporting] 解析完成: 列名=%v, 结果行数=%d", allCols, len(pbResult.Results))
+	
+	// 动态定位列索引，根据真实返回的列名来映射
+	colIdx := make(map[string]int)
+	for i, name := range allCols {
+		colIdx[strings.ToLower(name)] = i
+	}
+	
+	// 查找关键列的位置（兼容多种可能的命名）
+	findCol := func(candidates ...string) int {
+		for _, c := range candidates {
+			if idx, ok := colIdx[strings.ToLower(c)]; ok {
+				return idx
+			}
+		}
+		return -1
+	}
+	
+	idxItemName := findCol("ItemName", "itemname")
+	idxDuration := findCol("PlayDuration", "PlaybackDuration", "playduration", "playbackduration")
+	idxIP := findCol("IpAddress", "ipaddress", "RemoteAddress", "remoteaddress")
+	idxDevice := findCol("DeviceName", "devicename", "ClientName", "clientname")
+	idxDate := findCol("DateCreated", "datecreated")
+	
+	log.Printf("[PlaybackReporting] 列索引映射: ItemName=%d, Duration=%d, IP=%d, Device=%d, Date=%d", idxItemName, idxDuration, idxIP, idxDevice, idxDate)
 	
 	// 构造允许命中的日期字符串前缀（兼容本地和 UTC 差异）
 	validDays := make(map[string]bool)
@@ -363,36 +389,44 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 	var items []string
 	
 	for _, row := range pbResult.Results {
-		if len(row) >= 5 {
-			dateStr := row[4]
-			// 在 Go 代码级别进行防御性过滤，只要日期前缀(如 2026-03-16) 不在查询范围内，直接丢弃
+		// 日期过滤
+		if idxDate >= 0 && idxDate < len(row) {
+			dateStr := row[idxDate]
 			if len(dateStr) >= 10 {
 				prefix := dateStr[:10]
 				if !validDays[prefix] {
 					continue
 				}
 			}
-
-			itemName := row[0]
-			playDurationStr := row[1]
-			ip := row[2]
-			device := row[3]
-			
-			if ip != "" {
-				ipMap[ip] = true
-			}
-			if device != "" {
-				deviceMap[device] = true
-			}
-			if itemName != "" && !itemMap[itemName] {
-				itemMap[itemName] = true
-				items = append(items, itemName)
-			}
-			
-			var durSec int
-			fmt.Sscanf(playDurationStr, "%d", &durSec)
-			totalDurationSec += durSec
 		}
+
+		// 提取各字段（安全索引访问）
+		getVal := func(idx int) string {
+			if idx >= 0 && idx < len(row) {
+				return row[idx]
+			}
+			return ""
+		}
+		
+		itemName := getVal(idxItemName)
+		durationStr := getVal(idxDuration)
+		ip := getVal(idxIP)
+		device := getVal(idxDevice)
+		
+		if ip != "" {
+			ipMap[ip] = true
+		}
+		if device != "" {
+			deviceMap[device] = true
+		}
+		if itemName != "" && !itemMap[itemName] {
+			itemMap[itemName] = true
+			items = append(items, itemName)
+		}
+		
+		var durSec int
+		fmt.Sscanf(durationStr, "%d", &durSec)
+		totalDurationSec += durSec
 	}
 	
 	stats := &UserPlaybackReporting{
@@ -401,7 +435,7 @@ func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int)
 		IPList:        make([]string, 0, len(ipMap)),
 		DeviceList:    make([]string, 0, len(deviceMap)),
 		WatchedItems:  items,
-		TotalDuration: totalDurationSec / 60, // 换算为分钟
+		TotalDuration: totalDurationSec / 60,
 	}
 	
 	for ip := range ipMap {
