@@ -230,3 +230,58 @@ func (ec *EmbyClient) SearchByProviderID(tmdbID int, mediaType string) ([]EmbyMe
 
 	return result.Items, nil
 }
+
+// GetLatestMedia 获取最新入库的影视资源
+// 通过限制 Limit 并按 DateCreated 降序排，获取最新的电视剧和电影
+func (ec *EmbyClient) GetLatestMedia(limit int) ([]EmbyMediaItem, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	reqURL := fmt.Sprintf("%s/Items?SortBy=DateCreated&SortOrder=Descending&Limit=%d&IncludeItemTypes=Movie,Series&Recursive=true&Fields=MediaSources&api_key=%s",
+		ec.URL, limit, ec.APIKey)
+
+	resp, err := ec.Client.Get(reqURL)
+	if err != nil {
+		return nil, fmt.Errorf("获取最新入库资源失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Emby API 响应非 200: %d", resp.StatusCode)
+	}
+
+	var result embyItemsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析最新资源结果失败: %w", err)
+	}
+
+	return result.Items, nil
+}
+
+// GetUserPlayback 获取指定用户最近观看的媒体
+// embyUserID 为用户在 Emby 内的 UUID（可通过 EmbyBoss 获取）
+func (ec *EmbyClient) GetUserPlayback(embyUserID string, limit int) ([]EmbyMediaItem, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	// 按最新播放时间排序（无论是否看完）
+	reqURL := fmt.Sprintf("%s/Users/%s/Items?SortBy=DatePlayed&SortOrder=Descending&Limit=%d&IncludeItemTypes=Movie,Series&Recursive=true&Fields=MediaSources&api_key=%s",
+		ec.URL, embyUserID, limit, ec.APIKey)
+
+	resp, err := ec.Client.Get(reqURL)
+	if err != nil {
+		return nil, fmt.Errorf("获取用户观看历史失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Emby API 响应非 200: %d", resp.StatusCode)
+	}
+
+	var result embyItemsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析用户观影历史失败: %w", err)
+	}
+
+	return result.Items, nil
+}

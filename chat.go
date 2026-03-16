@@ -1026,6 +1026,60 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		log.Printf("[AI] 启用图片生成 generate_image 工具...")
 	}
 
+	// 注入 Emby & EmbyBoss 深度交互专用的管家 Tools (前提是配置了对应的 API 客户端)
+	if ch.embyMap[chatID] != nil {
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "search_emby_library",
+				Description: "在私有 Emby 影音库中搜索是否拥有某部完整的电影或电视剧源文件。当用户问库里有没有什么片子时使用。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{
+							"type":        "string",
+							"description": "搜索关键词，例如电影名或导演名",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		})
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "get_emby_latest_added",
+				Description: "查询私有 Emby 影音库最近上传入库的电影或电视剧列表。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"limit": map[string]any{
+							"type":        "integer",
+							"description": "需要查询的最近更新数量，建议 5 到 10",
+						},
+					},
+				},
+			},
+		})
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "get_user_playback_stats",
+				Description: "查询当前对话用户最近在 Emby 中观看过的影片记录（用于分析用户偏好并做精准推荐）。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"limit": map[string]any{
+							"type":        "integer",
+							"description": "需要查询的最近观影数量，建议 5 到 10",
+						},
+					},
+				},
+			},
+		})
+		log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback)...")
+	}
+
 	// 循环处理 AI 的响应（支持多次连续工具调用）
 	var reply string
 	for i := 0; i < 5; i++ { // 最多允许连续调用5次工具
@@ -1144,6 +1198,101 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 						Name:       tc.Function.Name,
 						Content:    MessageContent{Text: toolResult},
 					})
+				}
+
+				// 处理 Emby 管家 - 库内搜索
+				if tc.Function.Name == "search_emby_library" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 search_emby_library 参数失败: %v", err)
+						continue
+					}
+					query, _ := args["query"].(string)
+					log.Printf("[AI] 【触发片库搜索】关键词: %s", query)
+					
+					var toolResult string
+					if embyClient := ch.embyMap[chatID]; embyClient != nil {
+						items, err := embyClient.SearchMedia(query)
+						if err != nil {
+							toolResult = fmt.Sprintf("搜索失败: %v", err)
+						} else if len(items) == 0 {
+							toolResult = "库中未找到相关资源。"
+						} else {
+							var sb strings.Builder
+							for i, item := range items {
+								if i >= 10 { break }
+								sb.WriteString(fmt.Sprintf("- %s\n", item.FormatMediaInfo()))
+							}
+							toolResult = sb.String()
+						}
+					} else {
+						toolResult = "未配置 EmbyClient，无法查询片库。"
+					}
+					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
+				}
+
+				// 处理 Emby 管家 - 查询最新入库
+				if tc.Function.Name == "get_emby_latest_added" {
+					var args map[string]any
+					json.Unmarshal([]byte(tc.Function.Arguments), &args)
+					limitF, ok := args["limit"].(float64)
+					limit := 10
+					if ok && limitF > 0 { limit = int(limitF) }
+					
+					log.Printf("[AI] 【触发最新入库】Limit: %d", limit)
+					var toolResult string
+					if embyClient := ch.embyMap[chatID]; embyClient != nil {
+						items, err := embyClient.GetLatestMedia(limit)
+						if err != nil {
+							toolResult = fmt.Sprintf("查询最新入库失败: %v", err)
+						} else if len(items) == 0 {
+							toolResult = "暂无最新入库记录。"
+						} else {
+							var sb strings.Builder
+							for _, item := range items {
+								sb.WriteString(fmt.Sprintf("- %s\n", item.FormatMediaInfo()))
+							}
+							toolResult = sb.String()
+						}
+					} else {
+						toolResult = "未配置 EmbyClient，无法查询。"
+					}
+					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
+				}
+
+				// 处理 Emby 管家 - 查询用户观影历史
+				if tc.Function.Name == "get_user_playback_stats" {
+					var args map[string]any
+					json.Unmarshal([]byte(tc.Function.Arguments), &args)
+					limitF, ok := args["limit"].(float64)
+					limit := 10
+					if ok && limitF > 0 { limit = int(limitF) }
+					
+					var toolResult string
+					// 需要拿到真实的请求用户ID(即 msg.From.ID )去查询最新的播放历史
+					if ebClient := ch.ebMap[chatID]; ebClient != nil && ch.embyMap[chatID] != nil {
+						userInfo, err := ebClient.GetUserInfo(msg.From.ID)
+						if err == nil && userInfo != nil && userInfo.Data.EmbyID != "" {
+							log.Printf("[AI] 【触发历史观影】TGID: %d, EmbyID: %s", msg.From.ID, userInfo.Data.EmbyID)
+							items, err := ch.embyMap[chatID].GetUserPlayback(userInfo.Data.EmbyID, limit)
+							if err != nil {
+								toolResult = fmt.Sprintf("查询用户历史观影记录失败: %v", err)
+							} else if len(items) == 0 {
+								toolResult = "该用户近期无观影记录。"
+							} else {
+								var sb strings.Builder
+								for _, item := range items {
+									sb.WriteString(fmt.Sprintf("- %s\n", item.FormatMediaInfo()))
+								}
+								toolResult = sb.String()
+							}
+						} else {
+							toolResult = "无法获取当前用户的 Emby 账号绑定数据，系统无法查询他的专属观影记录。"
+						}
+					} else {
+						toolResult = "未配置 Emby或EmbyBoss 服务端，功能受限。"
+					}
+					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
 				}
 			}
 			// 继续进行下一次请求，让 AI 总结搜索结果
