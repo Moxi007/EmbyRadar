@@ -1065,40 +1065,24 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			Type: "function",
 			Function: &ToolFunction{
 				Name:        "get_user_playback_stats",
-				Description: "查询当前对话用户最近在 Emby 中观看过的影片记录（用于分析用户偏好并做精准推荐）。",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"limit": map[string]any{
-							"type":        "integer",
-							"description": "需要查询的最近观影数量，建议 5 到 10",
-						},
-					},
-				},
-			},
-		})
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: &ToolFunction{
-				Name:        "get_user_ip_device_stats",
-				Description: "通过 Playback Reporting 插件查询特定用户在指定天数内观影所使用的独立公网 IP 数量和独立设备数量（用于排查内鬼和账号分享）。",
+				Description: "全能管家探针：通过底层系统查询特定用户在指定天数内的所有综合观影记录（包含：观看了哪些剧集、耗时多久、使用了几个独立的公网 IP、用了几台设备等）。当提问涉及到查水表、防分享、借号抓内鬼、或者单纯询问“某某看了什么好东西”时必须调用。",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"target_tg_id": map[string]any{
 							"type":        "integer",
-							"description": "需要查询的目标用户的 Telegram ID (如果没指定别人，就是当前对话的用户 ID)",
+							"description": "需要重点关照/查询的目标用户的 Telegram ID (如果没指定别人，默认就是当前跟你对话的这个人的 ID)",
 						},
 						"days": map[string]any{
 							"type":        "integer",
-							"description": "查询范围的天数，默认 1（代表最近 24 小时），如果查询更长请指定，比如 7。",
+							"description": "要查询的历史时间跨度（天），默认 1（代表今天/最近24小时），可以指定长达 7 或者 30。",
 						},
 					},
 					"required": []string{"target_tg_id"},
 				},
 			},
 		})
-		log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback, ip_device_stats)...")
+		log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats)...")
 	}
 
 	// 循环处理 AI 的响应（支持多次连续工具调用）
@@ -1282,45 +1266,11 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 				}
 
 				// 处理 Emby 管家 - 查询用户观影历史
+				// 处理 Emby 管家 - 全能查询用户观影历史与设备/IP水表
 				if tc.Function.Name == "get_user_playback_stats" {
 					var args map[string]any
-					json.Unmarshal([]byte(tc.Function.Arguments), &args)
-					limitF, ok := args["limit"].(float64)
-					limit := 10
-					if ok && limitF > 0 { limit = int(limitF) }
-					
-					var toolResult string
-					// 需要拿到真实的请求用户ID(即 msg.From.ID )去查询最新的播放历史
-					if ebClient := ch.ebMap[chatID]; ebClient != nil && ch.embyMap[chatID] != nil {
-						userInfo, err := ebClient.GetUserInfo(msg.From.ID)
-						if err == nil && userInfo != nil && userInfo.Data.EmbyID != "" {
-							log.Printf("[AI] 【触发历史观影】TGID: %d, EmbyID: %s", msg.From.ID, userInfo.Data.EmbyID)
-							items, err := ch.embyMap[chatID].GetUserPlayback(userInfo.Data.EmbyID, limit)
-							if err != nil {
-								toolResult = fmt.Sprintf("查询用户历史观影记录失败: %v", err)
-							} else if len(items) == 0 {
-								toolResult = "该用户近期无观影记录。"
-							} else {
-								var sb strings.Builder
-								for _, item := range items {
-									sb.WriteString(fmt.Sprintf("- %s\n", item.FormatMediaInfo()))
-								}
-								toolResult = sb.String()
-							}
-						} else {
-							toolResult = "无法获取当前用户的 Emby 账号绑定数据，系统无法查询他的专属观影记录。"
-						}
-					} else {
-						toolResult = "未配置 Emby或EmbyBoss 服务端，功能受限。"
-					}
-					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
-				}
-
-				// 处理 Emby 管家 - 查水表抓内鬼 (IP 和 设备数)
-				if tc.Function.Name == "get_user_ip_device_stats" {
-					var args map[string]any
 					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						log.Printf("[AI] 解析 get_user_ip_device_stats 参数失败: %v", err)
+						log.Printf("[AI] 解析 get_user_playback_stats 参数失败: %v", err)
 						continue
 					}
 					
@@ -1330,7 +1280,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 						targetTgID = int64(val)
 					}
 					
-					// 查几天？
+					// 查几天？默认 1 天
 					days := 1
 					if val, ok := args["days"].(float64); ok && val > 0 {
 						days = int(val)
@@ -1340,24 +1290,40 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 					if ebClient := ch.ebMap[chatID]; ebClient != nil && ch.embyMap[chatID] != nil {
 						userInfo, err := ebClient.GetUserInfo(targetTgID)
 						if err == nil && userInfo != nil && userInfo.Data.EmbyID != "" {
-							log.Printf("[AI] 【触发查水表】TGID: %d, EmbyID: %s, 天数: %d", targetTgID, userInfo.Data.EmbyID, days)
-							stats, err := ch.embyMap[chatID].GetUserIPAndDeviceStats(userInfo.Data.EmbyID, days)
+							log.Printf("[AI] 【触发全能观影探针】TGID: %d, EmbyID: %s, 天数: %d", targetTgID, userInfo.Data.EmbyID, days)
+							stats, err := ch.embyMap[chatID].GetUserPlaybackReportingStats(userInfo.Data.EmbyID, days)
 							if err != nil {
-								toolResult = fmt.Sprintf("查询失败(可能尚未安装 Playback Reporting 插件): %v", err)
+								toolResult = fmt.Sprintf("查询失败(可能尚未安装 Playback Reporting 插件或数据库异常): %v", err)
 							} else {
-								toolResult = fmt.Sprintf("内部数据：目标用户在近 %d 天内，使用了 %d 个独立外网IP，以及 %d 台独立设备进行观影。\n", days, stats.UniqueIPs, stats.UniqueDevices)
+								var sb strings.Builder
+								sb.WriteString(fmt.Sprintf("以下是该用户在最近 %d 天内的全景观影报告：\n", days))
+								sb.WriteString(fmt.Sprintf("- 累计观看时长：约 %d 分钟\n", stats.TotalDuration))
+								sb.WriteString(fmt.Sprintf("- 使用独立外网IP数：%d 个\n", stats.UniqueIPs))
+								sb.WriteString(fmt.Sprintf("- 使用独立设备数：%d 台\n", stats.UniqueDevices))
+								
 								if stats.UniqueIPs > 0 {
-									toolResult += fmt.Sprintf("IP列表: %s\n", strings.Join(stats.IPList, ", "))
+									sb.WriteString(fmt.Sprintf("- IP明细: %s\n", strings.Join(stats.IPList, ", ")))
 								}
 								if stats.UniqueDevices > 0 {
-									toolResult += fmt.Sprintf("设备列表: %s\n", strings.Join(stats.DeviceList, ", "))
+									sb.WriteString(fmt.Sprintf("- 设备明细: %s\n", strings.Join(stats.DeviceList, ", ")))
 								}
+								
+								if len(stats.WatchedItems) > 0 {
+									sb.WriteString("- 观看过的内容清单（已去重）：\n")
+									for _, item := range stats.WatchedItems {
+										sb.WriteString(fmt.Sprintf("  * %s\n", item))
+									}
+								} else {
+									sb.WriteString("- 观看过的内容清单：无（该用户这几天彻底没看剧，可能确实在摸鱼）\n")
+								}
+								
+								toolResult = sb.String()
 							}
 						} else {
-							toolResult = fmt.Sprintf("无法获取目标TGID=%d 的 Emby 生效账号数据（未绑定或不存在），无法查阅其IP统计。", targetTgID)
+							toolResult = fmt.Sprintf("无法获取目标TGID=%d 的 Emby 生效账号数据（未绑定或不存在），无法查阅他的播放记录。", targetTgID)
 						}
 					} else {
-						toolResult = "未配置相关服务接口，无法执行查水表功能。"
+						toolResult = "未配置相关服务接口，功能受限。"
 					}
 					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
 				}

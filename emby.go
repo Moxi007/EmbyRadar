@@ -259,40 +259,14 @@ func (ec *EmbyClient) GetLatestMedia(limit int) ([]EmbyMediaItem, error) {
 	return result.Items, nil
 }
 
-// GetUserPlayback 获取指定用户最近观看的媒体
-// embyUserID 为用户在 Emby 内的 UUID（可通过 EmbyBoss 获取）
-func (ec *EmbyClient) GetUserPlayback(embyUserID string, limit int) ([]EmbyMediaItem, error) {
-	if limit <= 0 {
-		limit = 10
-	}
-	// 按最新播放时间排序（无论是否看完）
-	reqURL := fmt.Sprintf("%s/Users/%s/Items?SortBy=DatePlayed&SortOrder=Descending&Limit=%d&IncludeItemTypes=Movie,Series&Recursive=true&Fields=MediaSources&api_key=%s",
-		ec.URL, embyUserID, limit, ec.APIKey)
-
-	resp, err := ec.Client.Get(reqURL)
-	if err != nil {
-		return nil, fmt.Errorf("获取用户观看历史失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Emby API 响应非 200: %d", resp.StatusCode)
-	}
-
-	var result embyItemsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析用户观影历史失败: %w", err)
-	}
-
-	return result.Items, nil
-}
-
-// UserIPDeviceStats 记录去重后的统计信息
-type UserIPDeviceStats struct {
-	UniqueIPs      int
-	UniqueDevices  int
-	IPList         []string
-	DeviceList     []string
+// UserPlaybackReporting 记录单个用户的各项综合统计数据（由 Playback Reporting 提供）
+type UserPlaybackReporting struct {
+	UniqueIPs       int
+	UniqueDevices   int
+	IPList          []string
+	DeviceList      []string
+	TotalDuration   int      // 累计观看时长（分钟）
+	WatchedItems    []string // 观影清单排重
 }
 
 type playbackReportingCustomQueryReq struct {
@@ -306,14 +280,15 @@ type playbackReportingQueryResult struct {
 	Results [][]string `json:"results"`
 }
 
-// GetUserIPAndDeviceStats 使用 Playback Reporting 插件直接发送 SQL 拉取对应天数内的播放活动数据以统计 IP/设备数
-func (ec *EmbyClient) GetUserIPAndDeviceStats(embyUserID string, days int) (*UserIPDeviceStats, error) {
+// GetUserPlaybackReportingStats 替代官方 500 的接口及单纯查水表的接口。
+// 使用 Playback Reporting 插件的 SQL 拉取指定天数内的数据，整合出时长、内容、IP和设备。
+func (ec *EmbyClient) GetUserPlaybackReportingStats(embyUserID string, days int) (*UserPlaybackReporting, error) {
 	if days <= 0 {
 		days = 1 // 默认至少查 1 天（最近 24 小时）
 	}
 	
-	// 构建原生的 SQLite 查询注入
-	queryStr := fmt.Sprintf("SELECT IpAddress, DeviceName FROM PlaybackActivity WHERE UserId = '%s' AND DateCreated >= datetime('now', '-%d days')", embyUserID, days)
+	// 为了兼容 Emby Boss 脱掉连字符的 UUID，我们使用 REPLACE 函数直接匹配
+	queryStr := fmt.Sprintf("SELECT ItemName, PlaybackDuration, IpAddress, DeviceName FROM PlaybackActivity WHERE REPLACE(UserId, '-', '') = '%s' AND DateCreated >= datetime('now', '-%d days') ORDER BY DateCreated DESC LIMIT 300", embyUserID, days)
 	
 	payload := playbackReportingCustomQueryReq{
 		CustomQueryString: queryStr,
@@ -349,25 +324,42 @@ func (ec *EmbyClient) GetUserIPAndDeviceStats(embyUserID string, days int) (*Use
 	
 	ipMap := make(map[string]bool)
 	deviceMap := make(map[string]bool)
+	itemMap := make(map[string]bool)
+	totalDurationSec := 0
+	
+	var items []string
 	
 	for _, row := range pbResult.Results {
-		if len(row) >= 2 {
-			ip := row[0]
-			device := row[1]
+		if len(row) >= 4 {
+			itemName := row[0]
+			playDurationStr := row[1]
+			ip := row[2]
+			device := row[3]
+			
 			if ip != "" {
 				ipMap[ip] = true
 			}
 			if device != "" {
 				deviceMap[device] = true
 			}
+			if itemName != "" && !itemMap[itemName] {
+				itemMap[itemName] = true
+				items = append(items, itemName)
+			}
+			
+			var durSec int
+			fmt.Sscanf(playDurationStr, "%d", &durSec)
+			totalDurationSec += durSec
 		}
 	}
 	
-	stats := &UserIPDeviceStats{
+	stats := &UserPlaybackReporting{
 		UniqueIPs:     len(ipMap),
 		UniqueDevices: len(deviceMap),
 		IPList:        make([]string, 0, len(ipMap)),
 		DeviceList:    make([]string, 0, len(deviceMap)),
+		WatchedItems:  items,
+		TotalDuration: totalDurationSec / 60, // 换算为分钟
 	}
 	
 	for ip := range ipMap {
