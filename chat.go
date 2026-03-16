@@ -1077,7 +1077,28 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 				},
 			},
 		})
-		log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback)...")
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "get_user_ip_device_stats",
+				Description: "通过 Playback Reporting 插件查询特定用户在指定天数内观影所使用的独立公网 IP 数量和独立设备数量（用于排查内鬼和账号分享）。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"target_tg_id": map[string]any{
+							"type":        "integer",
+							"description": "需要查询的目标用户的 Telegram ID (如果没指定别人，就是当前对话的用户 ID)",
+						},
+						"days": map[string]any{
+							"type":        "integer",
+							"description": "查询范围的天数，默认 1（代表最近 24 小时），如果查询更长请指定，比如 7。",
+						},
+					},
+					"required": []string{"target_tg_id"},
+				},
+			},
+		})
+		log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback, ip_device_stats)...")
 	}
 
 	// 循环处理 AI 的响应（支持多次连续工具调用）
@@ -1291,6 +1312,52 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 						}
 					} else {
 						toolResult = "未配置 Emby或EmbyBoss 服务端，功能受限。"
+					}
+					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
+				}
+
+				// 处理 Emby 管家 - 查水表抓内鬼 (IP 和 设备数)
+				if tc.Function.Name == "get_user_ip_device_stats" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 get_user_ip_device_stats 参数失败: %v", err)
+						continue
+					}
+					
+					// 目标用户是谁？
+					targetTgID := msg.From.ID
+					if val, ok := args["target_tg_id"].(float64); ok && val > 0 {
+						targetTgID = int64(val)
+					}
+					
+					// 查几天？
+					days := 1
+					if val, ok := args["days"].(float64); ok && val > 0 {
+						days = int(val)
+					}
+					
+					var toolResult string
+					if ebClient := ch.ebMap[chatID]; ebClient != nil && ch.embyMap[chatID] != nil {
+						userInfo, err := ebClient.GetUserInfo(targetTgID)
+						if err == nil && userInfo != nil && userInfo.Data.EmbyID != "" {
+							log.Printf("[AI] 【触发查水表】TGID: %d, EmbyID: %s, 天数: %d", targetTgID, userInfo.Data.EmbyID, days)
+							stats, err := ch.embyMap[chatID].GetUserIPAndDeviceStats(userInfo.Data.EmbyID, days)
+							if err != nil {
+								toolResult = fmt.Sprintf("查询失败(可能尚未安装 Playback Reporting 插件): %v", err)
+							} else {
+								toolResult = fmt.Sprintf("内部数据：目标用户在近 %d 天内，使用了 %d 个独立外网IP，以及 %d 台独立设备进行观影。\n", days, stats.UniqueIPs, stats.UniqueDevices)
+								if stats.UniqueIPs > 0 {
+									toolResult += fmt.Sprintf("IP列表: %s\n", strings.Join(stats.IPList, ", "))
+								}
+								if stats.UniqueDevices > 0 {
+									toolResult += fmt.Sprintf("设备列表: %s\n", strings.Join(stats.DeviceList, ", "))
+								}
+							}
+						} else {
+							toolResult = fmt.Sprintf("无法获取目标TGID=%d 的 Emby 生效账号数据（未绑定或不存在），无法查阅其IP统计。", targetTgID)
+						}
+					} else {
+						toolResult = "未配置相关服务接口，无法执行查水表功能。"
 					}
 					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
 				}

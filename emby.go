@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -284,4 +285,97 @@ func (ec *EmbyClient) GetUserPlayback(embyUserID string, limit int) ([]EmbyMedia
 	}
 
 	return result.Items, nil
+}
+
+// UserIPDeviceStats 记录去重后的统计信息
+type UserIPDeviceStats struct {
+	UniqueIPs      int
+	UniqueDevices  int
+	IPList         []string
+	DeviceList     []string
+}
+
+type playbackReportingCustomQueryReq struct {
+	CustomQueryString string `json:"CustomQueryString"`
+	ReplaceUserId     bool   `json:"ReplaceUserId"`
+}
+
+type playbackReportingQueryResult struct {
+	Columns []string   `json:"columns"`
+	Colums  []string   `json:"colums"` // 兼容拼写错误
+	Results [][]string `json:"results"`
+}
+
+// GetUserIPAndDeviceStats 使用 Playback Reporting 插件直接发送 SQL 拉取对应天数内的播放活动数据以统计 IP/设备数
+func (ec *EmbyClient) GetUserIPAndDeviceStats(embyUserID string, days int) (*UserIPDeviceStats, error) {
+	if days <= 0 {
+		days = 1 // 默认至少查 1 天（最近 24 小时）
+	}
+	
+	// 构建原生的 SQLite 查询注入
+	queryStr := fmt.Sprintf("SELECT IpAddress, DeviceName FROM PlaybackActivity WHERE UserId = '%s' AND DateCreated >= datetime('now', '-%d days')", embyUserID, days)
+	
+	payload := playbackReportingCustomQueryReq{
+		CustomQueryString: queryStr,
+		ReplaceUserId:     false,
+	}
+	
+	bodyData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("构建查询 Payload 失败: %w", err)
+	}
+	
+	reqURL := fmt.Sprintf("%s/user_usage_stats/submit_custom_query?api_key=%s", ec.URL, ec.APIKey)
+	req, err := http.NewRequest("POST", reqURL, bytes.NewBuffer(bodyData))
+	if err != nil {
+		return nil, fmt.Errorf("构建请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := ec.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求 Playback Reporting 接口失败: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Playback Reporting API 错误，可能未安装该插件: %d", resp.StatusCode)
+	}
+	
+	var pbResult playbackReportingQueryResult
+	if err := json.NewDecoder(resp.Body).Decode(&pbResult); err != nil {
+		return nil, fmt.Errorf("解析结果失败: %w", err)
+	}
+	
+	ipMap := make(map[string]bool)
+	deviceMap := make(map[string]bool)
+	
+	for _, row := range pbResult.Results {
+		if len(row) >= 2 {
+			ip := row[0]
+			device := row[1]
+			if ip != "" {
+				ipMap[ip] = true
+			}
+			if device != "" {
+				deviceMap[device] = true
+			}
+		}
+	}
+	
+	stats := &UserIPDeviceStats{
+		UniqueIPs:     len(ipMap),
+		UniqueDevices: len(deviceMap),
+		IPList:        make([]string, 0, len(ipMap)),
+		DeviceList:    make([]string, 0, len(deviceMap)),
+	}
+	
+	for ip := range ipMap {
+		stats.IPList = append(stats.IPList, ip)
+	}
+	for dev := range deviceMap {
+		stats.DeviceList = append(stats.DeviceList, dev)
+	}
+	
+	return stats, nil
 }
