@@ -26,7 +26,7 @@
       "emby_api_key": "YOUR_EMBY_API_KEY",
       "embyboss_api_url": "http://127.0.0.1:7738",
       "embyboss_api_token": "YOUR_EMBYBOSS_API_TOKEN",
-      "embyboss_currency_name": "",
+      "embyboss_currency_name": "鸡蛋",
       "server_name": "我的服务器",
       "update_interval": 60,
       "welcome_sticker_id": "",
@@ -44,11 +44,11 @@
       },
       "ai_knowledge_dir": "config/knowledge",
       "ai_emby_stats_format": "",
+      "request_enabled": false,
       "request_admins": [
         111111111,
         222222222
       ],
-      "request_enabled": false,
       "request_coin_cost": 0,
       "ai_image_enabled": false,
       "ai_image_model": "",
