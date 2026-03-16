@@ -361,6 +361,12 @@ func FormatAdminMessage(session *RequestSession, groupName string, existingItems
 	}
 	sb.WriteString(fmt.Sprintf("\n来自群组：%s", groupLink))
 
+	// 如果有原始消息 ID，添加跳转链接让管理员可以直接定位到原始求片消息
+	if session.MessageID > 0 && strings.HasPrefix(chatIDStr, "-100") {
+		msgLink := fmt.Sprintf("https://t.me/c/%s/%d", chatIDStr[4:], session.MessageID)
+		sb.WriteString(fmt.Sprintf("\n💬 [查看原始消息](%s)", msgLink))
+	}
+
 	return sb.String()
 }
 
@@ -992,6 +998,7 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 		TMDBResults: results,
 		IsRemaster:  isRemaster,
 		Season:      season,
+		MessageID:   query.Message.MessageID, // 记录 AI 回复消息 ID，用于后续引用
 		State:       StateWaitConfirm,
 		CreatedAt:   time.Now(),
 		ExpiresAt:   time.Now().Add(sessionTimeout),
@@ -1094,9 +1101,12 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		}
 	}
 
-	// 在原求片群聊中发送通知消息
+	// 在原求片群聊中发送通知消息，引用用户原始求片消息
 	notifyMsg := tgbotapi.NewMessage(cbData.ChatID, notifyText)
 	notifyMsg.ParseMode = "Markdown"
+	if dbRecord != nil && dbRecord.MessageID > 0 {
+		notifyMsg.ReplyToMessageID = dbRecord.MessageID
+	}
 	if _, err := ch.bot.Send(notifyMsg); err != nil {
 		log.Printf("[求片] 在群聊 %d 中发送通知失败: %v", cbData.ChatID, err)
 	}

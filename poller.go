@@ -109,6 +109,9 @@ func (p *Poller) checkAndNotify(record *RequestRecord) error {
 	notifyText := FormatFulfilledNotify(record.UserID, record.UserName, record.Title, record.TMDBID, record.MediaType)
 	notifyMsg := tgbotapi.NewMessage(record.ChatID, notifyText)
 	notifyMsg.ParseMode = "Markdown"
+	if record.MessageID > 0 {
+		notifyMsg.ReplyToMessageID = record.MessageID
+	}
 	if _, err := p.bot.Send(notifyMsg); err != nil {
 		// 通知发送失败，保持 approved 状态，下一轮重试
 		return fmt.Errorf("发送入库通知失败: %w", err)
