@@ -993,29 +993,38 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 				},
 			},
 		})
-		if ch.canQuerySensitiveInfo(msg) {
-			tools = append(tools, Tool{
-				Type: "function",
-				Function: &ToolFunction{
-					Name:        "get_user_playback_stats",
-					Description: "全能管家探针：通过底层系统查询特定用户在指定天数内的所有综合观影记录（包含：观看了哪些剧集、耗时多久、使用了几个独立的公网 IP、用了几台设备等）。当提问涉及到查水表、防分享、借号抓内鬼、或者单纯询问“某某看了什么好东西”时必须调用。",
-					Parameters: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"target_tg_id": map[string]any{
-								"type":        "integer",
-								"description": "需要重点关照/查询的目标用户的 Telegram ID (如果没指定别人，默认就是当前跟你对话的这个人的 ID)",
-							},
-							"days": map[string]any{
-								"type":        "integer",
-								"description": "要查询的历史时间跨度（天），默认 1（代表今天/最近24小时），可以指定长达 7 或者 30。",
-							},
-						},
-						"required": []string{"target_tg_id"},
-					},
-				},
-			})
+		isSensitiveAllowed := ch.canQuerySensitiveInfo(msg)
+		isGroupChat := msg.Chat != nil && (msg.Chat.Type == "group" || msg.Chat.Type == "supergroup")
+		allowSensitiveDetails := isSensitiveAllowed && !isGroupChat
+		playbackDesc := "全能管家探针：通过底层系统查询特定用户在指定天数内的所有综合观影记录（包含：观看了哪些剧集、耗时多久、使用了几个独立的公网 IP、用了几台设备等）。当提问涉及到查水表、防分享、借号抓内鬼、或者单纯询问“某某看了什么好东西”时必须调用。"
+		required := []string{"target_tg_id"}
+		if !isSensitiveAllowed {
+			playbackDesc += " 非管理员仅允许查询自己的观影记录，且不会返回任何 IP 或设备信息。"
+			required = []string{}
+		} else if !allowSensitiveDetails {
+			playbackDesc += " 群聊只返回汇总信息，不会输出具体 IP 或设备明细。"
 		}
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "get_user_playback_stats",
+				Description: playbackDesc,
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"target_tg_id": map[string]any{
+							"type":        "integer",
+							"description": "需要重点关照/查询的目标用户的 Telegram ID (如果没指定别人，默认就是当前跟你对话的这个人的 ID)",
+						},
+						"days": map[string]any{
+							"type":        "integer",
+							"description": "要查询的历史时间跨度（天），默认 1（代表今天/最近24小时），可以指定长达 7 或者 30。",
+						},
+					},
+					"required": required,
+				},
+			},
+		})
 		tools = append(tools, Tool{
 			Type: "function",
 			Function: &ToolFunction{
@@ -1036,7 +1045,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		if ch.canQuerySensitiveInfo(msg) {
 			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats, user_info)...")
 		} else {
-			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, user_info)，已限制敏感查询工具")
+			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats[脱敏], user_info)")
 		}
 	}
 
@@ -1223,11 +1232,6 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 				// 处理 Emby 管家 - 查询用户观影历史
 				// 处理 Emby 管家 - 全能查询用户观影历史与设备/IP水表
 				if tc.Function.Name == "get_user_playback_stats" {
-					if !ch.canQuerySensitiveInfo(msg) {
-						toolResult := "权限不足：仅限机器人管理员或群组管理员可查询设备/IP信息。"
-						messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
-						continue
-					}
 					var args map[string]any
 					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 						log.Printf("[AI] 解析 get_user_playback_stats 参数失败: %v", err)
@@ -1235,9 +1239,17 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 					}
 					
 					// 目标用户是谁？
-					targetTgID := msg.From.ID
+					isSensitiveAllowed := ch.canQuerySensitiveInfo(msg)
+					isGroupChat := msg.Chat != nil && (msg.Chat.Type == "group" || msg.Chat.Type == "supergroup")
+					allowSensitiveDetails := isSensitiveAllowed && !isGroupChat
+					requestedTgID := msg.From.ID
 					if val, ok := args["target_tg_id"].(float64); ok && val > 0 {
-						targetTgID = int64(val)
+						requestedTgID = int64(val)
+					}
+					requestedOther := requestedTgID != msg.From.ID
+					targetTgID := msg.From.ID
+					if isSensitiveAllowed {
+						targetTgID = requestedTgID
 					}
 					
 					// 查几天？默认 1 天
@@ -1256,16 +1268,24 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 								toolResult = fmt.Sprintf("查询失败(可能尚未安装 Playback Reporting 插件或数据库异常): %v", err)
 							} else {
 								var sb strings.Builder
+								if !isSensitiveAllowed && requestedOther {
+									sb.WriteString("提示：仅允许查询自己的记录，已自动切换为你的账号。\n")
+								}
 								sb.WriteString(fmt.Sprintf("以下是该用户在最近 %d 天内的全景观影报告：\n", days))
 								sb.WriteString(fmt.Sprintf("- 累计观看时长：约 %d 分钟\n", stats.TotalDuration))
-								sb.WriteString(fmt.Sprintf("- 使用独立外网IP数：%d 个\n", stats.UniqueIPs))
-								sb.WriteString(fmt.Sprintf("- 使用独立设备数：%d 台\n", stats.UniqueDevices))
-								
-								if stats.UniqueIPs > 0 {
-									sb.WriteString(fmt.Sprintf("- IP明细: %s\n", strings.Join(stats.IPList, ", ")))
-								}
-								if stats.UniqueDevices > 0 {
-									sb.WriteString(fmt.Sprintf("- 设备明细: %s\n", strings.Join(stats.DeviceList, ", ")))
+								if isSensitiveAllowed {
+									sb.WriteString(fmt.Sprintf("- 使用独立外网IP数：%d 个\n", stats.UniqueIPs))
+									sb.WriteString(fmt.Sprintf("- 使用独立设备数：%d 台\n", stats.UniqueDevices))
+									if allowSensitiveDetails {
+										if stats.UniqueIPs > 0 {
+											sb.WriteString(fmt.Sprintf("- IP明细: %s\n", strings.Join(stats.IPList, ", ")))
+										}
+										if stats.UniqueDevices > 0 {
+											sb.WriteString(fmt.Sprintf("- 设备明细: %s\n", strings.Join(stats.DeviceList, ", ")))
+										}
+									} else {
+										sb.WriteString("提示：群聊不输出具体 IP/设备明细，如需查看请私聊机器人。\n")
+									}
 								}
 								
 								if len(stats.WatchedItems) > 0 {
