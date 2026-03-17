@@ -110,7 +110,7 @@ func main() {
 		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", appConfig.Global.AIModel)
 
 		// 注册快捷命令菜单
-		setBotCommands(bot)
+		setBotCommands(bot, appConfig)
 
 		// 监听退出信号，优雅关闭数据库和 Poller
 		sigCh := make(chan os.Signal, 1)
@@ -305,7 +305,7 @@ func initLogger() {
 
 // setBotCommands 设置机器人命令菜单，使聊天界面出现快捷菜单。
 // 普通用户看到基础命令，管理员额外看到管理类命令。
-func setBotCommands(bot *tgbotapi.BotAPI) {
+func setBotCommands(bot *tgbotapi.BotAPI, appConfig *AppConfig) {
 	// 普通用户可见的命令（默认作用域）
 	commands := []tgbotapi.BotCommand{
 		{Command: "ask", Description: "提问 (用法: /ask 你的问题)"},
@@ -339,5 +339,19 @@ func setBotCommands(bot *tgbotapi.BotAPI) {
 		log.Printf("[Warn] 设置管理员命令菜单失败: %v", err)
 	} else {
 		log.Printf("[Bot] 管理员命令菜单已注册")
+	}
+
+	// BotAdmins 在私聊里也需要看到管理命令（私聊不属于管理员作用域）
+	if appConfig != nil && len(appConfig.Global.BotAdmins) > 0 {
+		for _, adminID := range appConfig.Global.BotAdmins {
+			privateScope := tgbotapi.NewSetMyCommandsWithScope(
+				tgbotapi.NewBotCommandScopeChat(adminID),
+				adminCommands...,
+			)
+			if _, err := bot.Request(privateScope); err != nil {
+				log.Printf("[Warn] 设置管理员私聊命令菜单失败 (admin=%d): %v", adminID, err)
+			}
+		}
+		log.Printf("[Bot] 管理员私聊命令菜单已注册")
 	}
 }
