@@ -155,13 +155,26 @@ type InventoryCheckResult struct {
 	IsRemasterRequest bool            // 是否标记为洗版请求
 }
 
-// CheckInventory 根据 Emby 搜索结果、洗版标志和季数判断求片请求是否允许继续
+// parseYearInt 将 TMDB 年份字符串解析为 int（无效返回 0）
+func parseYearInt(yearStr string) int {
+	if len(yearStr) < 4 {
+		return 0
+	}
+	year, err := strconv.Atoi(yearStr[:4])
+	if err != nil {
+		return 0
+	}
+	return year
+}
+
+// CheckInventory 根据 Emby 搜索结果、洗版标志、季数及年份判断求片请求是否允许继续
 // 规则：
 //   - Emby 结果为空 → 允许（库中无该资源）
 //   - 非空且 isRemaster 为 true → 允许，标记为洗版请求
 //   - 非空且为 TV 类型且指定了季数 → 允许（Emby 按标题搜索无法精确到季，不应阻止新季求片）
+//   - 若仅为标题匹配且指定了年份 → 仅当存在同年条目才判定为重复
 //   - 非空且非洗版且非新季请求 → 拒绝，附带已有资源信息
-func CheckInventory(embyItems []EmbyMediaItem, isRemaster bool, mediaType string, season int) *InventoryCheckResult {
+func CheckInventory(embyItems []EmbyMediaItem, isRemaster bool, mediaType string, season int, requestedYear int, exactMatch bool) *InventoryCheckResult {
 	// Emby 搜索结果为空，库中无该资源，允许请求继续
 	if len(embyItems) == 0 {
 		return &InventoryCheckResult{
@@ -188,6 +201,23 @@ func CheckInventory(embyItems []EmbyMediaItem, isRemaster bool, mediaType string
 			Reason:        fmt.Sprintf("求片第 %d 季，库中已有该系列但无法确认是否包含该季", season),
 			ExistingItems: embyItems,
 		}
+	}
+
+	// 若是标题匹配且用户指定了年份，则仅当存在同年条目才视为重复
+	if !exactMatch && requestedYear > 0 {
+		var sameYearItems []EmbyMediaItem
+		for _, item := range embyItems {
+			if item.Year == requestedYear {
+				sameYearItems = append(sameYearItems, item)
+			}
+		}
+		if len(sameYearItems) == 0 {
+			return &InventoryCheckResult{
+				Allowed: true,
+				Reason:  "库中存在同名资源但年份不一致，允许继续",
+			}
+		}
+		embyItems = sameYearItems
 	}
 
 	// 库中已有资源且非洗版请求，拒绝
@@ -701,17 +731,29 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 
 	// 进行 Emby 库存查重
 	var embyItems []EmbyMediaItem
+	exactMatch := false
 	embyClient := ch.embyMap[session.ChatID]
 	if embyClient != nil {
-		items, err := embyClient.SearchMedia(selected.GetDisplayTitle())
+		// 先用 TMDB ID 精确查重，避免同名不同年的误判
+		items, err := embyClient.SearchByProviderID(selected.ID, selected.MediaType)
 		if err != nil {
-			log.Printf("[求片] Emby 搜索失败，视为库中无该资源: %v", err)
-		} else {
+			log.Printf("[求片] Emby 精确查重失败，回退到标题搜索: %v", err)
+		} else if len(items) > 0 {
 			embyItems = items
+			exactMatch = true
+		}
+		if len(embyItems) == 0 {
+			items, err := embyClient.SearchMedia(selected.GetDisplayTitle())
+			if err != nil {
+				log.Printf("[求片] Emby 搜索失败，视为库中无该资源: %v", err)
+			} else {
+				embyItems = items
+			}
 		}
 	}
 
-	checkResult := CheckInventory(embyItems, session.IsRemaster, selected.MediaType, session.Season)
+	requestedYear := parseYearInt(selected.GetYear())
+	checkResult := CheckInventory(embyItems, session.IsRemaster, selected.MediaType, session.Season, requestedYear, exactMatch)
 
 	// 查重拒绝：通知用户资源已存在
 	if !checkResult.Allowed {
