@@ -993,27 +993,29 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 				},
 			},
 		})
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: &ToolFunction{
-				Name:        "get_user_playback_stats",
-				Description: "全能管家探针：通过底层系统查询特定用户在指定天数内的所有综合观影记录（包含：观看了哪些剧集、耗时多久、使用了几个独立的公网 IP、用了几台设备等）。当提问涉及到查水表、防分享、借号抓内鬼、或者单纯询问“某某看了什么好东西”时必须调用。",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"target_tg_id": map[string]any{
-							"type":        "integer",
-							"description": "需要重点关照/查询的目标用户的 Telegram ID (如果没指定别人，默认就是当前跟你对话的这个人的 ID)",
+		if ch.canQuerySensitiveInfo(msg) {
+			tools = append(tools, Tool{
+				Type: "function",
+				Function: &ToolFunction{
+					Name:        "get_user_playback_stats",
+					Description: "全能管家探针：通过底层系统查询特定用户在指定天数内的所有综合观影记录（包含：观看了哪些剧集、耗时多久、使用了几个独立的公网 IP、用了几台设备等）。当提问涉及到查水表、防分享、借号抓内鬼、或者单纯询问“某某看了什么好东西”时必须调用。",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"target_tg_id": map[string]any{
+								"type":        "integer",
+								"description": "需要重点关照/查询的目标用户的 Telegram ID (如果没指定别人，默认就是当前跟你对话的这个人的 ID)",
+							},
+							"days": map[string]any{
+								"type":        "integer",
+								"description": "要查询的历史时间跨度（天），默认 1（代表今天/最近24小时），可以指定长达 7 或者 30。",
+							},
 						},
-						"days": map[string]any{
-							"type":        "integer",
-							"description": "要查询的历史时间跨度（天），默认 1（代表今天/最近24小时），可以指定长达 7 或者 30。",
-						},
+						"required": []string{"target_tg_id"},
 					},
-					"required": []string{"target_tg_id"},
 				},
-			},
-		})
+			})
+		}
 		tools = append(tools, Tool{
 			Type: "function",
 			Function: &ToolFunction{
@@ -1031,7 +1033,11 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 				},
 			},
 		})
-		log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats, user_info)...")
+		if ch.canQuerySensitiveInfo(msg) {
+			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats, user_info)...")
+		} else {
+			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, user_info)，已限制敏感查询工具")
+		}
 	}
 
 	// 循环处理 AI 的响应（支持多次连续工具调用）
@@ -1217,6 +1223,11 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 				// 处理 Emby 管家 - 查询用户观影历史
 				// 处理 Emby 管家 - 全能查询用户观影历史与设备/IP水表
 				if tc.Function.Name == "get_user_playback_stats" {
+					if !ch.canQuerySensitiveInfo(msg) {
+						toolResult := "权限不足：仅限机器人管理员或群组管理员可查询设备/IP信息。"
+						messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
+						continue
+					}
 					var args map[string]any
 					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 						log.Printf("[AI] 解析 get_user_playback_stats 参数失败: %v", err)
@@ -1609,6 +1620,41 @@ func (ch *ChatHandler) isAdmin(msg *tgbotapi.Message) bool {
 	}
 
 	// 检查是否为群管理员
+	memberConfig := tgbotapi.GetChatMemberConfig{
+		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+			ChatID: msg.Chat.ID,
+			UserID: msg.From.ID,
+		},
+	}
+
+	member, err := ch.bot.GetChatMember(memberConfig)
+	if err != nil {
+		log.Printf("[AI] 获取用户权限失败: %v", err)
+		return false
+	}
+
+	return member.Status == "administrator" || member.Status == "creator"
+}
+
+// canQuerySensitiveInfo 检查用户是否有权限查询设备/IP等敏感信息
+// 仅允许：Bot 管理员 或 群组管理员
+func (ch *ChatHandler) canQuerySensitiveInfo(msg *tgbotapi.Message) bool {
+	if msg == nil || msg.From == nil {
+		return false
+	}
+
+	// 全局 BotAdmins 直接放行
+	for _, adminID := range ch.appConfig.Global.BotAdmins {
+		if msg.From.ID == adminID {
+			return true
+		}
+	}
+
+	// 仅群聊允许群管理员放行，私聊不放行
+	if msg.Chat == nil || (msg.Chat.Type != "group" && msg.Chat.Type != "supergroup") {
+		return false
+	}
+
 	memberConfig := tgbotapi.GetChatMemberConfig{
 		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
 			ChatID: msg.Chat.ID,
