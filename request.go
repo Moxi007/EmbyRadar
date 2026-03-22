@@ -1229,7 +1229,15 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		notifyMsg.ReplyToMessageID = dbRecord.MessageID
 	}
 	if _, err := ch.bot.Send(notifyMsg); err != nil {
-		log.Printf("[求片] 在群聊 %d 中发送通知失败: %v", cbData.ChatID, err)
+		if strings.Contains(err.Error(), "message to be replied not found") || strings.Contains(err.Error(), "reply message not found") {
+			log.Printf("[求片] 原始求片消息不存在，降级为直接发送通知 (chat=%d)", cbData.ChatID)
+			notifyMsg.ReplyToMessageID = 0
+			if _, err2 := ch.bot.Send(notifyMsg); err2 != nil {
+				log.Printf("[求片] 降级发送通知仍然失败: %v", err2)
+			}
+		} else {
+			log.Printf("[求片] 在群聊 %d 中发送通知失败: %v", cbData.ChatID, err)
+		}
 	}
 
 	// 更新所有管理员私聊中的消息：替换标题为处理结果标记，并移除按钮
@@ -1492,7 +1500,15 @@ func (rh *RequestHandler) HandleLibraryNewNotify(ch *ChatHandler, targetChatID i
 		}
 
 		if _, err := ch.bot.Send(reply); err != nil {
-			log.Printf("[求片] 向用户 %d 发送入库通知失败: %v", rec.UserID, err)
+			if strings.Contains(err.Error(), "message to be replied not found") || strings.Contains(err.Error(), "reply message not found") {
+				log.Printf("[求片] 原始求片消息不存在，降级为直接发送入库通知 (user=%d)", rec.UserID)
+				reply.ReplyToMessageID = 0
+				if _, err2 := ch.bot.Send(reply); err2 != nil {
+					log.Printf("[求片] 降级发送入库通知仍然失败: %v", err2)
+				}
+			} else {
+				log.Printf("[求片] 向用户 %d 发送入库通知失败: %v", rec.UserID, err)
+			}
 		}
 
 		// 更新记录状态为 fulfilled
