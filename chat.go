@@ -217,6 +217,8 @@ func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName 
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ✅已验证身份]", "")
+	reply = strings.ReplaceAll(reply, "⚠️未知平民", "")
+	reply = strings.ReplaceAll(reply, "✅已验证身份", "")
 	if idx := strings.Index(reply, "[INTERNAL_AUTH_TAG:"); idx != -1 {
 		if endIdx := strings.Index(reply[idx:], "]"); endIdx != -1 {
 			reply = reply[:idx] + reply[idx+endIdx+1:]
@@ -1367,6 +1369,8 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ✅已验证身份]", "")
+	reply = strings.ReplaceAll(reply, "⚠️未知平民", "")
+	reply = strings.ReplaceAll(reply, "✅已验证身份", "")
 	if idx := strings.Index(reply, "[INTERNAL_AUTH_TAG:"); idx != -1 {
 		if endIdx := strings.Index(reply[idx:], "]"); endIdx != -1 {
 			reply = reply[:idx] + reply[idx+endIdx+1:]

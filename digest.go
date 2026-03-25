@@ -152,6 +152,8 @@ func (ds *DigestScheduler) digestGroup(chatID int64) error {
 	// 清洗脱敏标记：即使记录里遗留了标记也安全移除
 	result = strings.ReplaceAll(result, "[INTERNAL_AUTH_TAG: ✅已验证身份]", "")
 	result = strings.ReplaceAll(result, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
+	result = strings.ReplaceAll(result, "✅已验证身份", "")
+	result = strings.ReplaceAll(result, "⚠️未知平民", "")
 	
 	// 按天区分词条，使用 KnowledgeBase.MergeEntry 将这一信息作为独立条目合入，或者以“群体记忆补充”名义合入
 	entryName := "群体日常记忆沉淀.md"
