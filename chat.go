@@ -921,14 +921,12 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		AllowSensitiveDetails: isSensitiveAllowed && !isGroupChat,
 	}
 
-	// 通过工具注册中心获取当前上下文可用的工具定义
-	tools := ch.toolRegistry.GetEnabledTools(toolCtx)
-
 	// Gemini 特殊处理：注入原生 Google Search Grounding（不经过 ToolRegistry）
+	var finalTools []Tool
 	if group.AISearchEnabled {
 		modelName := strings.ToLower(ch.appConfig.Global.AIModel)
 		if strings.Contains(modelName, "gemini") {
-			tools = append(tools, Tool{
+			finalTools = append(finalTools, Tool{
 				Type:         "google_search",
 				GoogleSearch: map[string]any{},
 			})
@@ -937,6 +935,11 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			log.Printf("[AI] 启用本地 DuckDuckGo search_web 工具...")
 		}
 	}
+
+	// 通过工具注册中心获取当前上下文可用的常规工具定义
+	registeredTools := ch.toolRegistry.GetEnabledTools(toolCtx)
+	finalTools = append(finalTools, registeredTools...)
+	tools := finalTools
 	if ch.tmdbMap[chatID] != nil {
 		log.Printf("[AI] 启用 TMDB search_tmdb 工具...")
 	}
