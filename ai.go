@@ -175,9 +175,6 @@ func (ac *AIClient) ChatCompletion(messages []ChatMessage, tools []Tool) (*ChatM
 		return nil, fmt.Errorf("序列化请求体失败: %w", err)
 	}
 
-	toolsJSON, _ := json.Marshal(reqBody.Tools)
-	log.Printf("[DEBUG] [Tools] 发往代理的工具数组结构: %s", string(toolsJSON))
-
 	url := fmt.Sprintf("%s/chat/completions", ac.BaseURL)
 	maxRetries := 3
 	var lastErr error
