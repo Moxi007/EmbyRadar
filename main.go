@@ -109,6 +109,35 @@ func main() {
 
 		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", appConfig.Global.AIModel)
 
+		// 启动 AI 心跳定时器（15 分钟），用于触发 Jobs 自治任务检查
+		heartbeatTicker := time.NewTicker(15 * time.Minute)
+		go func() {
+			for range heartbeatTicker.C {
+				// 只在有活跃任务时才触发心跳
+				if chatHandler.jobsLoader != nil && len(chatHandler.jobsLoader.ListActiveJobs()) > 0 {
+					log.Printf("[心跳] 检测到 %d 个活跃任务，触发 AI 自检...", len(chatHandler.jobsLoader.ListActiveJobs()))
+					// 向第一个配置的群组发送系统级心跳消息
+					if len(appConfig.Groups) > 0 {
+						firstGroup := appConfig.Groups[0]
+						heartbeatMsg := chatHandler.buildMessages(
+							firstGroup.TelegramChatID,
+							"系统心跳",
+							"系统最高权限",
+							"[系统心跳] 请检查你的活跃任务列表，如果有需要执行的任务，请主动执行。如果所有任务都在计划内且不需要立即行动，简短回复'已检查，无需操作'即可。",
+							"",
+							nil,
+						)
+						replyMsg, err := aiClient.ChatCompletion(heartbeatMsg, nil)
+						if err != nil {
+							log.Printf("[心跳] AI 自检调用失败: %v", err)
+						} else {
+							log.Printf("[心跳] AI 自检结果: %s", replyMsg.Content.Text)
+						}
+					}
+				}
+			}
+		}()
+
 		// 注册快捷命令菜单
 		setBotCommands(bot, appConfig)
 

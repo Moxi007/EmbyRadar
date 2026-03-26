@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -26,6 +25,13 @@ type ChatHandler struct {
 	tmdbMap        map[int64]*TMDBClient     // chatID → 独立 TMDB 客户端
 	requestHandler *RequestHandler           // 全局求片处理器
 	memoryStore    *MemoryStore              // 向量记忆存储 (可为 nil)
+
+	// 架构增强组件
+	sessionMgr      *SessionManager   // 会话队列管理器（防并发）
+	middlewareChain *MiddlewareChain  // Prompt 中间件链
+	toolRegistry    *ToolRegistry     // 工具注册中心
+	skillsLoader    *SkillsLoader     // 技能加载器 (可为 nil)
+	jobsLoader      *JobsLoader       // 任务加载器 (可为 nil)
 }
 
 // NewChatHandler 创建聊天处理器，遍历所有群组配置初始化各群组的独立客户端
@@ -75,6 +81,28 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 		}
 		ch.kbMap[chatID] = kb
 	}
+
+	// 初始化 Prompt 中间件链
+	ch.middlewareChain = DefaultMiddlewareChain()
+	ch.middlewareChain.LogMiddlewares()
+
+	// 初始化工具注册中心
+	ch.toolRegistry = DefaultToolRegistry()
+
+	// 初始化技能加载器并注册 read_skill 工具
+	ch.skillsLoader = NewSkillsLoader("config/skills")
+	ch.toolRegistry.Register(&ReadSkillHandler{loader: ch.skillsLoader})
+
+	// 初始化任务加载器并注册 read_job / write_job 工具
+	ch.jobsLoader = NewJobsLoader("config/jobs")
+	ch.toolRegistry.Register(&ReadJobHandler{loader: ch.jobsLoader})
+	ch.toolRegistry.Register(&WriteJobHandler{loader: ch.jobsLoader})
+
+	log.Printf("[工具注册] 已注册 %d 个工具 (含技能和任务工具)", len(ch.toolRegistry.order))
+
+	// 初始化会话队列管理器（用于防并发）
+	ch.sessionMgr = NewSessionManager(ch.handleAIResponse)
+	log.Printf("[会话队列] 会话管理器已初始化")
 
 	return ch
 }
@@ -152,7 +180,7 @@ func (ch *ChatHandler) StartListening() {
 		}
 
 		if aiEnabled && ch.shouldRespond(update.Message) {
-			go ch.handleAIResponse(update.Message)
+			ch.sessionMgr.Enqueue(update.Message)
 		}
 	}
 }
@@ -433,7 +461,7 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 			return true
 		}
 
-		go ch.handleAIResponse(msg)
+		ch.sessionMgr.Enqueue(msg)
 		return true
 
 	case "request":
@@ -874,177 +902,49 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// 构建消息列表，传入媒体内容（无媒体时 media 为 nil）
 	messages := ch.buildMessages(chatID, displayRole, verifiedRole, userText, embyBossData, media)
 
-	// 准备工具配置
-	var tools []Tool
+	// 构建工具执行上下文
+	isSensitiveAllowed := ch.canQuerySensitiveInfo(msg)
+	isGroupChat := msg.Chat != nil && (msg.Chat.Type == "group" || msg.Chat.Type == "supergroup")
+	toolCtx := &ToolContext{
+		ChatID:                chatID,
+		SenderID:              senderID,
+		Msg:                   msg,
+		Group:                 group,
+		AppConfig:             ch.appConfig,
+		IsPrivate:             !isGroupChat,
+		EmbyClient:            ch.embyMap[chatID],
+		EBClient:              ch.ebMap[chatID],
+		TMDBClient:            ch.tmdbMap[chatID],
+		AIClient:              ch.aiClient,
+		ChatHandler:           ch,
+		IsSensitiveAllowed:    isSensitiveAllowed,
+		AllowSensitiveDetails: isSensitiveAllowed && !isGroupChat,
+	}
+
+	// 通过工具注册中心获取当前上下文可用的工具定义
+	tools := ch.toolRegistry.GetEnabledTools(toolCtx)
+
+	// Gemini 特殊处理：注入原生 Google Search Grounding（不经过 ToolRegistry）
 	if group.AISearchEnabled {
 		modelName := strings.ToLower(ch.appConfig.Global.AIModel)
 		if strings.Contains(modelName, "gemini") {
-			// Gemini 系列模型注入原生 Google Search Grounding 参数
 			tools = append(tools, Tool{
 				Type:         "google_search",
 				GoogleSearch: map[string]any{},
 			})
 			log.Printf("[AI] 检测到 Gemini 模型，注入原生 Google Search Grounding 参数...")
 		} else {
-			// 普通模型使用自定义的 DuckDuckGo 爬虫 Function Calling
-			currentDateStr := time.Now().Format("2006年01月")
-			tools = append(tools, Tool{
-				Type: "function",
-				Function: &ToolFunction{
-					Name:        "search_web",
-					Description: fmt.Sprintf("必须使用此工具来获取最新的资讯和新闻。当前时间是 %s，你的搜索关键词中必须主动携带 '%s' 或者具体日期作为检索词，否则你会搜到过时的旧新闻！", currentDateStr, currentDateStr),
-					Parameters: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"query": map[string]any{
-								"type":        "string",
-								"description": fmt.Sprintf("进行搜索引擎查询的关键词。务必包含时间如 '%s' 以保证时效性。", currentDateStr),
-							},
-						},
-						"required": []string{"query"},
-					},
-				},
-			})
 			log.Printf("[AI] 启用本地 DuckDuckGo search_web 工具...")
 		}
 	}
-
-	// 当群组配置了 TMDB API Key 时，注入 search_tmdb 工具定义
 	if ch.tmdbMap[chatID] != nil {
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: &ToolFunction{
-				Name:        "search_tmdb",
-				Description: "搜索 TMDB（The Movie Database）获取电影或电视剧的详细信息，包括简介、上映日期等。当用户询问影视相关问题时使用此工具。" +
-					"⚠️在回复中引用影视信息时，你必须原样使用搜索结果中提供的完整 TMDB 链接（格式为 https://www.themoviedb.org/...），绝对不能自行拼凑或修改链接中的任何部分。" +
-					"⚠️关于评分和评价：给用户展示评分时，必须【只提供豆瓣评分】（通过 search_web 工具搜索获取），只有在确实找不到豆瓣评分的情况下，才允许给出 TMDB 或 IMDb 等其他评分。评价一部影片时，绝对不能仅仅根据 TMDB 简介进行评价，你必须通过 search_web 工具搜索网上的真实影评和口碑，综合真实观众的评价来给出结论。",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"query": map[string]any{
-							"type":        "string",
-							"description": "搜索关键词（电影或电视剧名称）",
-						},
-						"media_type": map[string]any{
-							"type":        "string",
-							"enum":        []string{"movie", "tv", ""},
-							"description": "媒体类型：movie（电影）、tv（电视剧），留空则搜索全部",
-						},
-					},
-					"required": []string{"query"},
-				},
-			},
-		})
 		log.Printf("[AI] 启用 TMDB search_tmdb 工具...")
 	}
-
-	// 当群组启用了图片生成功能且配置了模型时，注入 generate_image 工具定义
 	if group.AIImageEnabled && group.AIImageModel != "" {
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: &ToolFunction{
-				Name:        "generate_image",
-				Description: "根据用户的文字描述生成图片。当用户要求画图、生成图片、创作图像时使用此工具。",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"prompt": map[string]any{
-							"type":        "string",
-							"description": "图片描述文本，详细描述要生成的图片内容",
-						},
-					},
-					"required": []string{"prompt"},
-				},
-			},
-		})
 		log.Printf("[AI] 启用图片生成 generate_image 工具...")
 	}
-
-	// 注入 Emby & EmbyBoss 深度交互专用的管家 Tools (前提是配置了对应的 API 客户端)
 	if ch.embyMap[chatID] != nil {
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: &ToolFunction{
-				Name:        "search_emby_library",
-				Description: "在私有 Emby 影音库中搜索是否拥有某部完整的电影或电视剧源文件。当用户问库里有没有什么片子时使用。",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"query": map[string]any{
-							"type":        "string",
-							"description": "搜索关键词，例如电影名或导演名",
-						},
-					},
-					"required": []string{"query"},
-				},
-			},
-		})
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: &ToolFunction{
-				Name:        "get_emby_latest_added",
-				Description: "查询私有 Emby 影音库最近上传入库的电影或电视剧列表。",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"limit": map[string]any{
-							"type":        "integer",
-							"description": "需要查询的最近更新数量，建议 5 到 10",
-						},
-					},
-				},
-			},
-		})
-		isSensitiveAllowed := ch.canQuerySensitiveInfo(msg)
-		isGroupChat := msg.Chat != nil && (msg.Chat.Type == "group" || msg.Chat.Type == "supergroup")
-		allowSensitiveDetails := isSensitiveAllowed && !isGroupChat
-		playbackDesc := "全能管家探针：通过底层系统查询特定用户在指定天数内的所有综合观影记录（包含：观看了哪些剧集、耗时多久、使用了几个独立的公网 IP、用了几台设备等）。当提问涉及到查水表、防分享、借号抓内鬼、或者单纯询问“某某看了什么好东西”时必须调用。"
-		required := []string{"target_tg_id"}
-		if !isSensitiveAllowed {
-			playbackDesc += " 非管理员仅允许查询自己的观影记录，且不会返回任何 IP 或设备信息。"
-			required = []string{}
-		} else if !allowSensitiveDetails {
-			playbackDesc += " 群聊只返回汇总信息，不会输出具体 IP 或设备明细。"
-		}
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: &ToolFunction{
-				Name:        "get_user_playback_stats",
-				Description: playbackDesc,
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"target_tg_id": map[string]any{
-							"type":        "integer",
-							"description": "需要重点关照/查询的目标用户的 Telegram ID (如果没指定别人，默认就是当前跟你对话的这个人的 ID)",
-						},
-						"days": map[string]any{
-							"type":        "integer",
-							"description": "要查询的历史时间跨度（天），默认 1（代表今天/最近24小时），可以指定长达 7 或者 30。",
-						},
-					},
-					"required": required,
-				},
-			},
-		})
-		tools = append(tools, Tool{
-			Type: "function",
-			Function: &ToolFunction{
-				Name:        "get_user_info",
-				Description: "查询特定用户的 Emby 账号基础信息、VIP 状态等级、积分余额和账号过期时间等。当问及“我的账号”、“我有多少钱”、“他过期了吗”等涉及系统系统数据时必须调用。",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"target_tg_id": map[string]any{
-							"type":        "integer",
-							"description": "需要查询的目标用户的 Telegram ID (如果没指定别人，默认查当前跟你对话的这个人的 ID)",
-						},
-					},
-					"required": []string{"target_tg_id"},
-				},
-			},
-		})
-		if ch.canQuerySensitiveInfo(msg) {
+		if isSensitiveAllowed {
 			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats, user_info)...")
 		} else {
 			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats[脱敏], user_info)")
@@ -1053,7 +953,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 
 	// 循环处理 AI 的响应（支持多次连续工具调用）
 	var reply string
-	for i := 0; i < 5; i++ { // 最多允许连续调用5次工具
+	for i := 0; i < 5; i++ {
 		aiMsg, err := ch.aiClient.ChatCompletion(messages, tools)
 		if err != nil {
 			log.Printf("[AI] 调用 AI 失败: %v", err)
@@ -1061,303 +961,21 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			return
 		}
 
-		// 将 AI 的响应加入消息列表
 		messages = append(messages, *aiMsg)
 
-		// 检查是否有工具调用
 		if len(aiMsg.ToolCalls) > 0 {
 			for _, tc := range aiMsg.ToolCalls {
-				if tc.Function.Name == "search_web" {
-					var args map[string]any
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						log.Printf("[AI] 解析参数失败: %v", err)
-						continue
-					}
-
-					query, ok := args["query"].(string)
-					if !ok {
-						log.Printf("[AI] 参数类型错误，query 不是 string")
-						continue
-					}
-
-					log.Printf("[AI] 【触发网络搜索】关键词: %s", query)
-					searchResult := SearchWeb(query)
-
-					// 将工具执行的结果作为 role="tool" 加回 messages
-					messages = append(messages, ChatMessage{
-						Role:       "tool",
-						ToolCallID: tc.ID,
-						Name:       tc.Function.Name,
-						Content:    MessageContent{Text: searchResult},
-					})
-				}
-
-				// 处理 TMDB 影视搜索工具调用
-				if tc.Function.Name == "search_tmdb" {
-					var args map[string]any
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						log.Printf("[AI] 解析 search_tmdb 参数失败: %v", err)
-						continue
-					}
-
-					query, _ := args["query"].(string)
-					mediaType, _ := args["media_type"].(string)
-
-					log.Printf("[AI] 【触发 TMDB 搜索】关键词: %s, 类型: %s", query, mediaType)
-
-					var tmdbResult string
-					if tmdbClient := ch.tmdbMap[chatID]; tmdbClient != nil {
-						results, err := tmdbClient.SearchMulti(query, mediaType)
-						if err != nil {
-							log.Printf("[AI] TMDB 搜索失败: %v", err)
-							tmdbResult = fmt.Sprintf("TMDB 搜索失败: %v", err)
-						} else {
-							tmdbResult = FormatTMDBResultsForAI(results)
-						}
-					} else {
-						tmdbResult = "TMDB 功能未配置，无法搜索影视信息。"
-					}
-
-					// 将工具执行的结果作为 role="tool" 加回 messages
-					messages = append(messages, ChatMessage{
-						Role:       "tool",
-						ToolCallID: tc.ID,
-						Name:       tc.Function.Name,
-						Content:    MessageContent{Text: tmdbResult},
-					})
-				}
-
-				// 处理图片生成工具调用
-				if tc.Function.Name == "generate_image" {
-					var args map[string]any
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						log.Printf("[AI] 解析 generate_image 参数失败: %v", err)
-						messages = append(messages, ChatMessage{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Name:       tc.Function.Name,
-							Content:    MessageContent{Text: fmt.Sprintf("参数解析失败: %v", err)},
-						})
-						continue
-					}
-
-					prompt, _ := args["prompt"].(string)
-					if prompt == "" {
-						messages = append(messages, ChatMessage{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Name:       tc.Function.Name,
-							Content:    MessageContent{Text: "缺少 prompt 参数"},
-						})
-						continue
-					}
-
-					log.Printf("[AI] 【触发图片生成】描述: %s", prompt)
-
-					// 调用图片生成并发送到群聊
-					err := ch.handleImageGeneration(msg, prompt, group)
-					var toolResult string
-					if err != nil {
-						toolResult = fmt.Sprintf("图片生成失败: %v", err)
-					} else {
-						toolResult = "图片已成功生成并发送"
-					}
-
-					messages = append(messages, ChatMessage{
-						Role:       "tool",
-						ToolCallID: tc.ID,
-						Name:       tc.Function.Name,
-						Content:    MessageContent{Text: toolResult},
-					})
-				}
-
-				// 处理 Emby 管家 - 库内搜索
-				if tc.Function.Name == "search_emby_library" {
-					var args map[string]any
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						log.Printf("[AI] 解析 search_emby_library 参数失败: %v", err)
-						continue
-					}
-					query, _ := args["query"].(string)
-					log.Printf("[AI] 【触发片库搜索】关键词: %s", query)
-					
-					var toolResult string
-					if embyClient := ch.embyMap[chatID]; embyClient != nil {
-						items, err := embyClient.SearchMedia(query)
-						if err != nil {
-							toolResult = fmt.Sprintf("搜索失败: %v", err)
-						} else if len(items) == 0 {
-							toolResult = "库中未找到相关资源。"
-						} else {
-							var sb strings.Builder
-							for i, item := range items {
-								if i >= 10 { break }
-								sb.WriteString(fmt.Sprintf("- %s\n", item.FormatMediaInfo()))
-							}
-							toolResult = sb.String()
-						}
-					} else {
-						toolResult = "未配置 EmbyClient，无法查询片库。"
-					}
-					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
-				}
-
-				// 处理 Emby 管家 - 查询最新入库
-				if tc.Function.Name == "get_emby_latest_added" {
-					var args map[string]any
-					json.Unmarshal([]byte(tc.Function.Arguments), &args)
-					limitF, ok := args["limit"].(float64)
-					limit := 10
-					if ok && limitF > 0 { limit = int(limitF) }
-					
-					log.Printf("[AI] 【触发最新入库】Limit: %d", limit)
-					var toolResult string
-					if embyClient := ch.embyMap[chatID]; embyClient != nil {
-						items, err := embyClient.GetLatestMedia(limit)
-						if err != nil {
-							toolResult = fmt.Sprintf("查询最新入库失败: %v", err)
-						} else if len(items) == 0 {
-							toolResult = "暂无最新入库记录。"
-						} else {
-							var sb strings.Builder
-							for _, item := range items {
-								sb.WriteString(fmt.Sprintf("- %s\n", item.FormatMediaInfo()))
-							}
-							toolResult = sb.String()
-						}
-					} else {
-						toolResult = "未配置 EmbyClient，无法查询。"
-					}
-					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
-				}
-
-				// 处理 Emby 管家 - 查询用户观影历史
-				// 处理 Emby 管家 - 全能查询用户观影历史与设备/IP水表
-				if tc.Function.Name == "get_user_playback_stats" {
-					var args map[string]any
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						log.Printf("[AI] 解析 get_user_playback_stats 参数失败: %v", err)
-						continue
-					}
-					
-					// 目标用户是谁？
-					isSensitiveAllowed := ch.canQuerySensitiveInfo(msg)
-					isGroupChat := msg.Chat != nil && (msg.Chat.Type == "group" || msg.Chat.Type == "supergroup")
-					allowSensitiveDetails := isSensitiveAllowed && !isGroupChat
-					requestedTgID := msg.From.ID
-					if val, ok := args["target_tg_id"].(float64); ok && val > 0 {
-						requestedTgID = int64(val)
-					}
-					requestedOther := requestedTgID != msg.From.ID
-					targetTgID := msg.From.ID
-					if isSensitiveAllowed {
-						targetTgID = requestedTgID
-					}
-					
-					// 查几天？默认 1 天
-					days := 1
-					if val, ok := args["days"].(float64); ok && val > 0 {
-						days = int(val)
-					}
-					
-					var toolResult string
-					if ebClient := ch.ebMap[chatID]; ebClient != nil && ch.embyMap[chatID] != nil {
-						userInfo, err := ebClient.GetUserInfo(targetTgID)
-						if err == nil && userInfo != nil && userInfo.Data.EmbyID != "" {
-							log.Printf("[AI] 【触发全能观影探针】TGID: %d, EmbyID: %s, 天数: %d", targetTgID, userInfo.Data.EmbyID, days)
-							stats, err := ch.embyMap[chatID].GetUserPlaybackReportingStats(userInfo.Data.EmbyID, days)
-							if err != nil {
-								toolResult = fmt.Sprintf("查询失败(可能尚未安装 Playback Reporting 插件或数据库异常): %v", err)
-							} else {
-								var sb strings.Builder
-								if !isSensitiveAllowed && requestedOther {
-									sb.WriteString("提示：仅允许查询自己的记录，已自动切换为你的账号。\n")
-								}
-								sb.WriteString(fmt.Sprintf("以下是该用户在最近 %d 天内的全景观影报告：\n", days))
-								sb.WriteString(fmt.Sprintf("- 累计观看时长：约 %d 分钟\n", stats.TotalDuration))
-								if isSensitiveAllowed {
-									sb.WriteString(fmt.Sprintf("- 使用独立外网IP数：%d 个\n", stats.UniqueIPs))
-									sb.WriteString(fmt.Sprintf("- 使用独立设备数：%d 台\n", stats.UniqueDevices))
-									if allowSensitiveDetails {
-										if stats.UniqueIPs > 0 {
-											sb.WriteString(fmt.Sprintf("- IP明细: %s\n", strings.Join(stats.IPList, ", ")))
-										}
-										if stats.UniqueDevices > 0 {
-											sb.WriteString(fmt.Sprintf("- 设备明细: %s\n", strings.Join(stats.DeviceList, ", ")))
-										}
-									} else {
-										sb.WriteString("提示：群聊不输出具体 IP/设备明细，如需查看请私聊机器人。\n")
-									}
-								}
-								
-								if len(stats.WatchedItems) > 0 {
-									sb.WriteString("- 观看过的内容清单（已去重）：\n")
-									for _, item := range stats.WatchedItems {
-										sb.WriteString(fmt.Sprintf("  * %s\n", item))
-									}
-								} else {
-									sb.WriteString("- 观看过的内容清单：无（该用户这几天彻底没看剧，可能确实在摸鱼）\n")
-								}
-								
-								toolResult = sb.String()
-							}
-						} else {
-							toolResult = fmt.Sprintf("无法获取目标TGID=%d 的 Emby 生效账号数据（未绑定或不存在），无法查阅他的播放记录。", targetTgID)
-						}
-					} else {
-						toolResult = "未配置相关服务接口，功能受限。"
-					}
-					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
-				}
-				
-				// 处理 Emby 管家 - 查询用户基础资产与状态 (VIP、余额、过期时间等)
-				if tc.Function.Name == "get_user_info" {
-					var args map[string]any
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						log.Printf("[AI] 解析 get_user_info 参数失败: %v", err)
-						continue
-					}
-					
-					// 目标用户是谁？
-					targetTgID := msg.From.ID
-					if val, ok := args["target_tg_id"].(float64); ok && val > 0 {
-						targetTgID = int64(val)
-					}
-					
-					var toolResult string
-					if ebClient := ch.ebMap[chatID]; ebClient != nil {
-						userInfoResp, err := ebClient.GetUserInfo(targetTgID)
-						if err == nil && userInfoResp != nil && userInfoResp.Data.Tg.String() != "" {
-							log.Printf("[AI] 【触发私人资产探针】TGID: %d", targetTgID)
-							currencyName := ch.getCurrencyName(chatID)
-							if targetTgID == msg.From.ID {
-								toolResult = userInfoResp.FormatForAI(currencyName)
-							} else {
-								toolResult = fmt.Sprintf("【内部数据查询结果 - 对象TG ID: %d】：账号名「%s」，余额 %d %s，状态「%s」，过期时间戳: %s。货币须称「%s」。",
-									targetTgID, userInfoResp.Data.Name, userInfoResp.Data.Iv, currencyName,
-									func() string {
-										if userInfoResp.Data.Lv == "c" {
-											return "封禁状态(被禁止登录)"
-										}
-										return "正常"
-									}(),
-									userInfoResp.Data.Ex,
-									currencyName)
-							}
-						} else {
-							toolResult = fmt.Sprintf("无法获取目标TGID=%d 的 Emby 生效账号数据（未绑定或不存在）。", targetTgID)
-						}
-					} else {
-						toolResult = "未开启或未配置相关 EmbyBoss 服务接口，功能受限。"
-					}
-					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
-				}
+				toolResult := ch.toolRegistry.Execute(tc.Function.Name, tc.Function.Arguments, toolCtx)
+				messages = append(messages, ChatMessage{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    MessageContent{Text: toolResult},
+				})
 			}
-			// 继续进行下一次请求，让 AI 总结搜索结果
 			continue
 		}
 
-		// 没有工具调用，正常返回文本
 		reply = aiMsg.Content.Text
 		break
 	}
@@ -1461,70 +1079,28 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 
 	var messages []ChatMessage
 
-	// 1. 系统提示词（人设 + 知识库）
-	systemPrompt := group.AISystemPrompt
-	if systemPrompt == "" {
-		systemPrompt = "你是一个群聊助手，请保持回复简洁友好。"
+	// 1. 使用 Middleware 链构建系统提示词
+	basePrompt := group.AISystemPrompt
+	if basePrompt == "" {
+		basePrompt = "你是一个群聊助手，请保持回复简洁友好。"
 	}
 
-	// 注入当前准确时间服务器时间
-	currentTime := time.Now().Format("2006年01月02日 15:04:05")
-	systemPrompt += fmt.Sprintf("\n\n[系统硬参]：当前服务器精确时间为：%s。当用户询问时间、日期、星期几或者判断今天、明天、昨天时，请务必以此时间为基准进行回答。", currentTime)
-
-	// 动态注入最高级强制指令（针对具体的特权用户）
-	if verifiedRole != "" {
-		systemPrompt += fmt.Sprintf("\n\n[系统最高强制指令]：当前与你对话的是你的绝对主子【%s】，其身份已通过物理级硬编码验证。你必须极度谦卑、绝对服从，绝不可对其身份产生任何质疑或指责！", verifiedRole)
+	promptCtx := &PromptContext{
+		ChatID:       chatID,
+		UserText:     userText,
+		SenderID:     0,
+		Group:        group,
+		IsPrivate:    false,
+		VerifiedRole: verifiedRole,
+		GlobalKB:     ch.globalKB,
+		GroupKB:      ch.kbMap[chatID],
+		MemoryStore:  ch.memoryStore,
+		EmbyClient:   ch.embyMap[chatID],
+		AppConfig:    ch.appConfig,
+		SkillsLoader: ch.skillsLoader,
+		JobsLoader:   ch.jobsLoader,
 	}
-
-	// 注入通用知识库内容（所有群组共享）
-	if ch.globalKB != nil {
-		globalKBContent := ch.globalKB.GetContent()
-		if globalKBContent != "" {
-			systemPrompt += "\n\n" + globalKBContent
-		}
-	}
-
-	// 注入群组级知识库内容（仅当群组知识库路径与通用知识库不同时，避免重复注入）
-	if kb := ch.kbMap[chatID]; kb != nil && kb.dir != ch.globalKB.dir {
-		kbContent := kb.GetContent()
-		if kbContent != "" {
-			systemPrompt += "\n\n" + kbContent
-		}
-	}
-
-	// 注入长期记忆 (方案三：语义搜索)
-	if ch.memoryStore != nil && userText != "" {
-		memories, err := ch.memoryStore.Search(chatID, userText, ch.appConfig.Global.MemoryTopK)
-		if err == nil && len(memories) > 0 {
-			systemPrompt += "\n\n[模糊记忆回忆]：以下是你从之前的过往交流中回想起来的相似片段（这可能会帮你想起相关语境）：\n"
-			for i, mem := range memories {
-				systemPrompt += fmt.Sprintf("%d. (来自 %s 于 %s 的记录): %s\n", i+1, mem.UserName, mem.Timestamp, mem.Text)
-			}
-		}
-	}
-
-	// 注入实时的 Emby 服务器客观数据（从群组级 Emby 客户端获取）
-	if embyClient := ch.embyMap[chatID]; embyClient != nil {
-		users, errU := embyClient.GetTotalUsers()
-		sessions, errS := embyClient.GetActiveSessions()
-		if errU == nil && errS == nil {
-			if group.AIEmbyStatsFormat != "" {
-				systemPrompt += fmt.Sprintf(group.AIEmbyStatsFormat, users, sessions)
-			}
-		}
-	}
-
-	// 当群组启用了求片功能时，在 system prompt 中注入求片引导指令，
-	// AI 识别到求片意图后返回特殊标记，由系统生成确认按钮
-	if group.RequestEnabled && ch.appConfig.Global.TMDBAPIKey != "" {
-		systemPrompt += "\n\n[系统硬约束 - 求片功能]：当用户表达想看某部影视、求片、找片、想要某个资源等意图时，" +
-			"你必须在回复末尾附加一个特殊标记：[REQUEST_CONFIRM:影视名称]。" +
-			"例如用户说「帮我找一下流浪地球」，你可以回复「好的，我来帮你搜索《流浪地球》[REQUEST_CONFIRM:流浪地球]」。" +
-			"标记中的影视名称应该是你理解的最准确的片名。" +
-			"注意：你不能声称已经帮用户提交了求片请求，你只是在帮用户发起搜索确认流程。" +
-			"如果用户只是在讨论或询问某部影视的信息（评分、剧情等），不要附加此标记。" +
-			"只有当用户明确表达了想要求片、想看、能不能加等获取资源的意图时才附加。"
-	}
+	systemPrompt := ch.middlewareChain.BuildSystemPrompt(basePrompt, promptCtx)
 
 	messages = append(messages, ChatMessage{
 		Role:    "system",
