@@ -114,3 +114,20 @@ func parseSkillFrontmatter(content string, path string) *SkillMetadata {
 	meta.Path = path
 	return &meta
 }
+
+// WriteSkill 写入/更新技能的 SKILL.md 内容
+func (sl *SkillsLoader) WriteSkill(skillID string, content string) error {
+	skillDir := filepath.Join(sl.dir, skillID)
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		return fmt.Errorf("创建技能目录失败: %w", err)
+	}
+
+	skillPath := filepath.Join(skillDir, "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("写入技能文件失败: %w", err)
+	}
+
+	// 重新加载
+	sl.Load()
+	return nil
+}

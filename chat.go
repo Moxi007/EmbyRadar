@@ -89,9 +89,10 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 	// 初始化工具注册中心
 	ch.toolRegistry = DefaultToolRegistry()
 
-	// 初始化技能加载器并注册 read_skill 工具
+	// 初始化技能加载器并注册 read_skill 和 write_skill 工具
 	ch.skillsLoader = NewSkillsLoader("config/skills")
 	ch.toolRegistry.Register(&ReadSkillHandler{loader: ch.skillsLoader})
+	ch.toolRegistry.Register(&WriteSkillHandler{loader: ch.skillsLoader})
 
 	// 初始化任务加载器并注册 read_job / write_job 工具
 	ch.jobsLoader = NewJobsLoader("config/jobs")

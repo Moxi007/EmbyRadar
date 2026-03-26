@@ -750,3 +750,50 @@ func (h *WriteJobHandler) Execute(args map[string]any, ctx *ToolContext) string 
 	return fmt.Sprintf("任务 %s 已成功保存", jobID)
 }
 
+// --- write_skill ---
+// WriteSkillHandler 写入/更新技能文档（仅管理员可用）
+type WriteSkillHandler struct {
+	loader *SkillsLoader
+}
+
+func (h *WriteSkillHandler) Name() string { return "write_skill" }
+func (h *WriteSkillHandler) Enabled(ctx *ToolContext) bool {
+	// 仅管理员可创建/修改技能
+	return h.loader != nil && ctx.IsSensitiveAllowed
+}
+func (h *WriteSkillHandler) Definition(ctx *ToolContext) Tool {
+	return Tool{
+		Type: "function",
+		Function: &ToolFunction{
+			Name:        "write_skill",
+			Description: "创建或更新一个技能文档。技能内容必须使用包含 YAML 前言的 Markdown 格式（含 name 和 description）。由于创建或修改后会实时生效，你可以利用此工具随时升级你自己的能力。仅管理员可用。",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"skill_id": map[string]any{
+						"type":        "string",
+						"description": "技能唯一ID（建议全英文小写下划线，会作为 config/skills/ 下的目录名）",
+					},
+					"content": map[string]any{
+						"type":        "string",
+						"description": "完整的 SKILL.md 内容（必须包括 `---` 包裹的 YAML 前端正文，至少要有 name 和 description 字段，下方接完整的 Markdown 执行步骤）",
+					},
+				},
+				"required": []string{"skill_id", "content"},
+			},
+		},
+	}
+}
+func (h *WriteSkillHandler) Execute(args map[string]any, ctx *ToolContext) string {
+	skillID, _ := args["skill_id"].(string)
+	content, _ := args["content"].(string)
+	if skillID == "" || content == "" {
+		return "缺少 skill_id 或 content 参数"
+	}
+	log.Printf("[工具] 【写入技能】ID: %s", skillID)
+
+	if err := h.loader.WriteSkill(skillID, content); err != nil {
+		return fmt.Sprintf("写入技能失败: %v", err)
+	}
+	return fmt.Sprintf("技能 %s 已成功保存并热重载生效！", skillID)
+}
