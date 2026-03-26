@@ -524,8 +524,97 @@ func DefaultToolRegistry() *ToolRegistry {
 	registry.Register(&GetEmbyLatestHandler{})
 	registry.Register(&GetUserPlaybackStatsHandler{})
 	registry.Register(&GetUserInfoHandler{})
+	registry.Register(&ScheduleMessageHandler{})
 	return registry
 }
+// --- schedule_message ---
+type ScheduleMessageHandler struct{}
+
+func (h *ScheduleMessageHandler) Name() string { return "schedule_message" }
+func (h *ScheduleMessageHandler) Enabled(ctx *ToolContext) bool {
+	// 仅允许：全局Bot管理员或当前群组的管理员
+	return ctx.IsSensitiveAllowed
+}
+func (h *ScheduleMessageHandler) Definition(ctx *ToolContext) Tool {
+	return Tool{
+		Type: "function",
+		Function: &ToolFunction{
+			Name:        "schedule_message",
+			Description: "高级群管工具：立刻或在延迟几分钟后，主动向当前群组发送一段消息。支持艾特和置顶。",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"delay_minutes": map[string]any{
+						"type":        "integer",
+						"description": "延迟的时间（分钟）。填 0 表示立刻发送。填正整数表示倒计时发送。",
+					},
+					"content": map[string]any{
+						"type":        "string",
+						"description": "要发送的消息完整内容。支持 Markdown，若要直接强行艾特人，请使用 [昵称](tg://user?id=纯数字ID) 的格式。",
+					},
+					"pin_message": map[string]any{
+						"type":        "boolean",
+						"description": "是否在发送成功后，立刻自动置顶此条消息。慎用！",
+					},
+				},
+				"required": []string{"delay_minutes", "content", "pin_message"},
+			},
+		},
+	}
+}
+func (h *ScheduleMessageHandler) Execute(args map[string]any, ctx *ToolContext) string {
+	delayMinFloat, ok1 := args["delay_minutes"].(float64)
+	content, ok2 := args["content"].(string)
+	pinMsg, ok3 := args["pin_message"].(bool)
+
+	if !ok1 || !ok2 || !ok3 {
+		return "执行失败：参数解析错误，必须提供 delay_minutes, content 和 pin_message"
+	}
+
+	delayMin := int(delayMinFloat)
+	if delayMin < 0 {
+		return "执行失败：delay_minutes 不能为负数"
+	}
+
+	sendMsgFunc := func() {
+		msg := tgbotapi.NewMessage(ctx.ChatID, content)
+		msg.ParseMode = "Markdown"
+		sentMsg, err := ctx.ChatHandler.bot.Send(msg)
+		if err != nil {
+			log.Printf("[AI Tool] schedule_message 发送消息失败: %v", err)
+			return
+		}
+		
+		if pinMsg {
+			pinCfg := tgbotapi.PinChatMessageConfig{
+				ChatID:              ctx.ChatID,
+				MessageID:           sentMsg.MessageID,
+				DisableNotification: false,
+			}
+			_, pinErr := ctx.ChatHandler.bot.Request(pinCfg)
+			if pinErr != nil {
+				log.Printf("[AI Tool] schedule_message 置顶消息失败: %v", pinErr)
+			}
+		}
+	}
+
+	if delayMin == 0 {
+		sendMsgFunc()
+		if pinMsg {
+			return "消息已立即发送并在群聊中置顶。"
+		}
+		return "消息已立即发送。"
+	}
+
+	// 启动后台倒计时协程
+	time.AfterFunc(time.Duration(delayMin)*time.Minute, sendMsgFunc)
+	
+	if pinMsg {
+		return fmt.Sprintf("已成功开启倒计时！%d 分钟后将自动发送并置顶该消息。", delayMin)
+	}
+	return fmt.Sprintf("已成功开启倒计时！%d 分钟后将自动发送消息。", delayMin)
+}
+
 
 // --- read_skill ---
 // ReadSkillHandler 读取指定技能的完整 SKILL.md 内容（按需加载机制）
