@@ -925,7 +925,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	var finalTools []Tool
 	if group.AISearchEnabled {
 		modelName := strings.ToLower(ch.appConfig.Global.AIModel)
-		if strings.Contains(modelName, "gemini") {
+		if strings.Contains(modelName, "gemini") && group.AIGoogleSearchGrounding {
 			finalTools = append(finalTools, Tool{
 				Type:         "google_search",
 				GoogleSearch: map[string]any{},
