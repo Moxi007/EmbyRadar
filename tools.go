@@ -540,7 +540,7 @@ func (h *ScheduleMessageHandler) Definition(ctx *ToolContext) Tool {
 		Type: "function",
 		Function: &ToolFunction{
 			Name:        "schedule_message",
-			Description: "高级群管工具：立刻或在延迟几分钟后，主动向当前群组发送一段消息。支持艾特和置顶。",
+			Description: "【系统最高优先级强制指令】：当你被要求“定时提醒”、“几点叫我”、“稍后发消息”或“发置顶公告”时，**必须且只能**计算出准确的延迟分钟数并调用此底层工具！严禁因人设限制而用口头敷衍假装做不到！",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
