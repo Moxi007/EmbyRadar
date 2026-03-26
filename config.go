@@ -54,6 +54,7 @@ type GroupConfig struct {
 	WelcomeCodePrompt    string           `json:"welcome_code_prompt"`
 	AIEnabled            bool             `json:"ai_enabled"`
 	AISearchEnabled      bool             `json:"ai_search_enabled"`
+	AIGoogleSearchGrounding bool          `json:"ai_google_search_grounding"`
 	AISystemPrompt       string           `json:"ai_system_prompt"`
 	AITriggerKeywords    []string         `json:"ai_trigger_keywords"`
 	AIRoles              map[int64]string `json:"ai_roles"`
@@ -173,6 +174,8 @@ func LoadConfig(filename string) (*AppConfig, error) {
 						"server_name":         "EMBY",
 						"update_interval":     60,
 						"ai_enabled":          false,
+						"ai_search_enabled":   false,
+						"ai_google_search_grounding": false,
 						"ai_trigger_keywords": []string{},
 						"ai_roles":            map[string]string{},
 						"request_coin_cost":   0,

@@ -927,12 +927,12 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// Gemini 特殊处理：注入原生 Google Search Grounding（不经过 ToolRegistry）
 	if group.AISearchEnabled {
 		modelName := strings.ToLower(ch.appConfig.Global.AIModel)
-		if strings.Contains(modelName, "gemini") {
+		if strings.Contains(modelName, "gemini") && group.AIGoogleSearchGrounding {
 			tools = append(tools, Tool{
 				Type:         "google_search",
 				GoogleSearch: map[string]any{},
 			})
-			log.Printf("[AI] 检测到 Gemini 模型，注入原生 Google Search Grounding 参数...")
+			log.Printf("[AI] 检测到 Gemini 模型并开启原生检索，注入 Google Search Grounding 参数...")
 		} else {
 			log.Printf("[AI] 启用本地 DuckDuckGo search_web 工具...")
 		}

@@ -104,7 +104,15 @@ type SearchWebHandler struct{}
 
 func (h *SearchWebHandler) Name() string { return "search_web" }
 func (h *SearchWebHandler) Enabled(ctx *ToolContext) bool {
-	return ctx.Group != nil && ctx.Group.AISearchEnabled
+	if ctx.Group == nil || !ctx.Group.AISearchEnabled {
+		return false
+	}
+	modelName := strings.ToLower(ctx.AppConfig.Global.AIModel)
+	if strings.Contains(modelName, "gemini") && ctx.Group.AIGoogleSearchGrounding {
+		// 如果是 Gemini 并且配置开启了原生检索，则停用默认网络搜索工具
+		return false
+	}
+	return true
 }
 func (h *SearchWebHandler) Definition(ctx *ToolContext) Tool {
 	// Gemini 的 Google Search 原生模式由调用层在外部特殊处理，
