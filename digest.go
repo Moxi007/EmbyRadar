@@ -9,27 +9,29 @@ import (
 
 // DigestScheduler 每日对话摘要调度器
 type DigestScheduler struct {
-	aiClient   *AIClient
-	ctxManager *ContextManager
-	kbMap      map[int64]*KnowledgeBase
-	groups     []*GroupConfig
-	digestHour int
-	stopCh     chan struct{}
+	aiClient    *AIClient
+	ctxManager  *ContextManager
+	kbMap       map[int64]*KnowledgeBase
+	groups      []*GroupConfig
+	digestHour  int
+	stopCh      chan struct{}
+	memoryStore *MemoryStore // 向量记忆存储（可为 nil，nil 时跳过向量写入）
 }
 
 // NewDigestScheduler 创建摘要调度器
-func NewDigestScheduler(aiClient *AIClient, ctxManager *ContextManager, appConfig *AppConfig) *DigestScheduler {
+func NewDigestScheduler(aiClient *AIClient, ctxManager *ContextManager, appConfig *AppConfig, memoryStore *MemoryStore) *DigestScheduler {
 	// 如果全局未在此环节配置 aiClient (没有通过初始化检查)，则不能启动
 	if aiClient == nil {
 		return nil
 	}
 	
 	ds := &DigestScheduler{
-		aiClient:   aiClient,
-		ctxManager: ctxManager,
-		groups:     appConfig.Groups,
-		digestHour: appConfig.Global.DigestHour,
-		stopCh:     make(chan struct{}),
+		aiClient:    aiClient,
+		ctxManager:  ctxManager,
+		groups:      appConfig.Groups,
+		digestHour:  appConfig.Global.DigestHour,
+		stopCh:      make(chan struct{}),
+		memoryStore: memoryStore,
 	}
 	
 	// 从各群组初始化信息里找到知识库引用，由于 main.go 中 ChatHandler 初始化了 kbMap，
@@ -118,17 +120,18 @@ func (ds *DigestScheduler) digestGroup(chatID int64) error {
 	}
 
 	systemPrompt := `你是一个群聊日志分析与知识沉淀引擎。
-你的任务是从以下群聊的“今日完整对话记录”中提取有价值的信息，以Markdown列表的格式输出。
+你的任务是从以下群聊的"今日完整对话记录"中提取有价值的信息，以Markdown列表的格式输出。
 
 **提取规则：**
-1. **用户偏好/画像：** 提取特定用户的偏好（例如“A用户喜欢看科幻电影”，“B用户寻求某个特定资源”）。
+1. **用户偏好/画像：** 提取特定用户的持久性偏好（例如"A用户喜欢看科幻电影"，"B用户的资产余额为 XX"）。
 2. **共识与规矩：** 群成员达成的明显共识、新制定的规矩或群主下达的指令。
-3. **重要事件：** 发生的重要讨论或结论。
+3. **重要群内事件：** 仅限与本群成员直接相关的重要讨论或结论。
 4. **排除废话：** 剔除所有毫无意义的闲聊、打招呼、表情包等。
 5. **高度浓缩：** 每个知识点必须尽可能简短，直接描述事实，不带时间戳。
+6. **排除时效信息：** 国际新闻、体育赛事结果、科技发布会、社会热点等具有时效性的外部资讯一律排除。只保留与本群成员个人相关的持久性画像、群规共识和资源入库变动。
 
-如果今天的聊天记录中完全没有上述有价值的信息，请**直接回复“无”**，并坚决不要输出任何其他内容。
-如果不为“无”，直接输出总结的内容。不需要开头结尾等客套语。`
+如果今天的聊天记录中完全没有上述有价值的信息，请**直接回复"无"**，并坚决不要输出任何其他内容。
+如果不为"无"，直接输出总结的内容。不需要开头结尾等客套语。`
 
 	// 组装请求
 	messages := []ChatMessage{
@@ -178,7 +181,21 @@ func (ds *DigestScheduler) digestGroup(chatID int64) error {
 	} else {
 		log.Printf("[每日摘要] 群聊 %d 沉淀内容已成功与已有记忆知识融合汇整。", chatID)
 	}
-	
+
+	// 双通道：同时将每日摘要写入向量记忆库，供语义检索按需召回
+	if ds.memoryStore != nil {
+		metadata := map[string]any{
+			"timestamp": time.Now().Format("2006-01-02"),
+			"user_name": "每日摘要",
+			"type":      "daily_digest",
+		}
+		if err := ds.memoryStore.Store(chatID, result, metadata); err != nil {
+			log.Printf("[每日摘要] 群聊 %d 写入向量记忆库失败: %v", chatID, err)
+		} else {
+			log.Printf("[每日摘要] 群聊 %d 摘要已同步写入向量记忆库", chatID)
+		}
+	}
+
 	return nil
 }
 

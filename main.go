@@ -75,10 +75,12 @@ func main() {
 		chatHandler := NewChatHandler(bot, aiClient, ctxManager, appConfig, requestHandler)
 
 		// --------- [方案三] 向量记忆引擎 ---------
+		var memoryStore *MemoryStore
 		if appConfig.Global.QdrantURL != "" {
-			memoryStore := NewMemoryStore(&appConfig.Global)
+			memoryStore = NewMemoryStore(&appConfig.Global)
 			if err := memoryStore.EnsureCollection(); err != nil {
 				log.Printf("[记忆] Qdrant 向量数据库连接或初始化失败: %v (向量记忆功能已降级关闭)", err)
+				memoryStore = nil // Reset to nil if connection failed
 			} else {
 				log.Printf("[记忆] 向量库已连接 (Qdrant: %s, TopK: %d)", appConfig.Global.QdrantURL, appConfig.Global.MemoryTopK)
 				chatHandler.SetMemoryStore(memoryStore)
@@ -101,7 +103,7 @@ func main() {
 		// 启动每日摘要调度器（方案四长久记忆核心）
 		var digestScheduler *DigestScheduler
 		if appConfig.Global.DigestEnabled {
-			digestScheduler = NewDigestScheduler(aiClient, ctxManager, appConfig)
+			digestScheduler = NewDigestScheduler(aiClient, ctxManager, appConfig, memoryStore)
 			if digestScheduler != nil {
 				digestScheduler.Start()
 			}
