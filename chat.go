@@ -927,7 +927,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	// Gemini 特殊处理：注入原生 Google Search Grounding（不经过 ToolRegistry）
 	if group.AISearchEnabled {
 		modelName := strings.ToLower(ch.appConfig.Global.AIModel)
-		if strings.Contains(modelName, "gemini") && group.AIGoogleSearchGrounding {
+		if strings.Contains(modelName, "gemini") {
 			tools = append(tools, Tool{
 				Type:         "google_search",
 				GoogleSearch: map[string]any{},

@@ -108,8 +108,8 @@ func (h *SearchWebHandler) Enabled(ctx *ToolContext) bool {
 		return false
 	}
 	modelName := strings.ToLower(ctx.AppConfig.Global.AIModel)
-	if strings.Contains(modelName, "gemini") && ctx.Group.AIGoogleSearchGrounding {
-		// 如果是 Gemini 并且配置开启了原生检索，则停用默认网络搜索工具
+	if strings.Contains(modelName, "gemini") {
+		// 如果是 Gemini ，强行绑定原生检索，停用默认网络搜索工具
 		return false
 	}
 	return true
