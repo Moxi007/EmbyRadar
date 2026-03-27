@@ -82,6 +82,14 @@ func (m *RoleMiddleware) Inject(ctx *PromptContext) string {
 	return ""
 }
 
+// MentionFormatMiddleware 提醒 AI 保留用户名称的超链接格式
+type MentionFormatMiddleware struct{}
+
+func (m *MentionFormatMiddleware) Name() string { return "mention_format" }
+func (m *MentionFormatMiddleware) Inject(ctx *PromptContext) string {
+	return "[系统强约束]：在你的回复中，如果需要称呼对面对话的用户、提及其他人的名字、或者进行问候（如叫醒服务、呼唤等），请务必『原样保留』我在对话上下文中提供给该用户的完整 Markdown 超链接格式（即 `[名字](tg://user?id=纯数字)`）。绝对不能只写纯文本名字，你必须连带方括号和圆括号里的链接一起完整输出，否则对方将无法收到你的艾特通知！"
+}
+
 // KnowledgeMiddleware 注入知识库内容（通用 + 群组级）
 type KnowledgeMiddleware struct{}
 
@@ -240,6 +248,7 @@ func DefaultMiddlewareChain() *MiddlewareChain {
 	return NewMiddlewareChain(
 		&TimeMiddleware{},
 		&RoleMiddleware{},
+		&MentionFormatMiddleware{},
 		&KnowledgeMiddleware{},
 		&MemoryMiddleware{},
 		&EmbyStatsMiddleware{},
