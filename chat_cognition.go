@@ -110,6 +110,27 @@ func (ch *ChatHandler) summarizeJobs() []string {
 	return out
 }
 
+func (ch *ChatHandler) summarizeStickers(chatID int64) []string {
+	group := ch.appConfig.GetGroupConfig(chatID)
+	if group == nil {
+		return nil
+	}
+	var out []string
+	if strings.TrimSpace(group.WelcomeStickerID) != "" {
+		out = append(out, "welcome: 默认欢迎贴纸")
+	}
+	for alias := range group.AIStickers {
+		if strings.TrimSpace(alias) == "" {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s: 可发送贴纸", alias))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func (ch *ChatHandler) buildRespondRequest(msg *MessageEnvelope, text string) *RespondRequest {
 	group := ch.appConfig.GetGroupConfig(msg.ChatID)
 	staticPrompt := "你是一个群聊助手，请保持回复简洁友好。"
@@ -136,6 +157,7 @@ func (ch *ChatHandler) buildRespondRequest(msg *MessageEnvelope, text string) *R
 		RecentContext:      ch.buildRecentContext(msg.ChatID),
 		SkillSummaries:     ch.summarizeSkills(),
 		JobSummaries:       ch.summarizeJobs(),
+		StickerSummaries:   ch.summarizeStickers(msg.ChatID),
 		KnowledgeSummary:   ch.summarizeKnowledge(msg.ChatID),
 	}
 }

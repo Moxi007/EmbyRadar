@@ -962,7 +962,8 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 	}
 
 	reply := strings.TrimSpace(resp.ReplyText)
-	if reply == "" {
+	toolDelivered := hasDeliveredConversation(resp.ToolTranscript)
+	if reply == "" && !toolDelivered {
 		reply = "（思考了很久，不知道该说什么）"
 	}
 
@@ -971,13 +972,15 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		Role:    "user",
 		Content: MessageContent{Text: fmt.Sprintf("%s: %s", displayRole, userText)},
 	})
-	ch.ctxManager.AddMessage(chatID, ChatMessage{
-		Role:    "assistant",
-		Content: MessageContent{Text: reply},
-	})
+	if reply != "" {
+		ch.ctxManager.AddMessage(chatID, ChatMessage{
+			Role:    "assistant",
+			Content: MessageContent{Text: reply},
+		})
+	}
 
 	// ====== [方案三：长期记忆异步归档] ======
-	if ch.memoryStore != nil {
+	if ch.memoryStore != nil && reply != "" {
 		go func(cid int64, userTextRaw, replyText string) {
 			memText := fmt.Sprintf("用户说: %s\nAI回答: %s", userTextRaw, replyText)
 			metadata := map[string]any{
@@ -990,11 +993,43 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}(chatID, userText, reply)
 	}
 
-	ch.sendReply(msg, reply)
-	ch.emitCognitionEvent("message.sent", chatID, senderID, envelope.DisplayName, 0, reply, map[string]any{
-		"episode_id": resp.EpisodeID,
-		"tool_calls": len(resp.ToolTranscript),
-	})
+	if reply != "" {
+		ch.sendReply(msg, reply)
+		ch.emitCognitionEvent("message.sent", chatID, senderID, envelope.DisplayName, 0, reply, map[string]any{
+			"episode_id": resp.EpisodeID,
+			"tool_calls": len(resp.ToolTranscript),
+		})
+	}
+}
+
+func hasDeliveredConversation(transcript []ToolTrace) bool {
+	for _, item := range transcript {
+		command := strings.TrimSpace(item.Command)
+		if strings.HasPrefix(command, "chat.say") || strings.HasPrefix(command, "chat.reply") || strings.HasPrefix(command, "chat.sticker") {
+			return true
+		}
+	}
+	return false
+}
+
+func (ch *ChatHandler) resolveSticker(chatID int64, name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	group := ch.appConfig.GetGroupConfig(chatID)
+	if group == nil {
+		return name
+	}
+	if name == "welcome" && strings.TrimSpace(group.WelcomeStickerID) != "" {
+		return strings.TrimSpace(group.WelcomeStickerID)
+	}
+	if group.AIStickers != nil {
+		if stickerID, ok := group.AIStickers[name]; ok && strings.TrimSpace(stickerID) != "" {
+			return strings.TrimSpace(stickerID)
+		}
+	}
+	return name
 }
 
 // cleanMention 从消息文本中移除 @botname

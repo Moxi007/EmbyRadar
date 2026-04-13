@@ -10,6 +10,7 @@ import (
 type TransportExecutor interface {
 	Say(chatID int64, text string) (int, error)
 	Reply(chatID int64, replyToMessageID int, text string) (int, error)
+	Sticker(chatID int64, sticker string) (int, error)
 	Pin(chatID int64, messageID int, disableNotification bool) error
 }
 
@@ -46,6 +47,15 @@ func (t *TelegramTransport) Reply(chatID int64, replyToMessageID int, text strin
 		if err != nil {
 			return 0, fmt.Errorf("回复消息失败: %w", err)
 		}
+	}
+	return sent.MessageID, nil
+}
+
+func (t *TelegramTransport) Sticker(chatID int64, sticker string) (int, error) {
+	msg := tgbotapi.NewSticker(chatID, tgbotapi.FileID(sticker))
+	sent, err := t.bot.Send(msg)
+	if err != nil {
+		return 0, fmt.Errorf("发送贴纸失败: %w", err)
 	}
 	return sent.MessageID, nil
 }

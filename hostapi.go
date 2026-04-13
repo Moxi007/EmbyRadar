@@ -124,6 +124,24 @@ func (he *HostEngine) Execute(command string, ctx HostCommandContext) (string, i
 			"kind": "chat.reply",
 		})
 		return "消息已回复", messageID, nil
+	case "chat.sticker":
+		target := strings.TrimSpace(rest)
+		if target == "" {
+			return "", 0, fmt.Errorf("chat.sticker 需要 sticker alias 或 file_id")
+		}
+		stickerID := he.chatHandler.resolveSticker(ctx.ChatID, target)
+		if stickerID == "" {
+			return "", 0, fmt.Errorf("未找到贴纸: %s", target)
+		}
+		messageID, err := he.chatHandler.transport.Sticker(ctx.ChatID, stickerID)
+		if err != nil {
+			return "", 0, err
+		}
+		he.chatHandler.emitCognitionEvent("message.sent", ctx.ChatID, ctx.SenderID, "", messageID, "", map[string]any{
+			"kind":    "chat.sticker",
+			"sticker": target,
+		})
+		return "贴纸已发送", messageID, nil
 	case "chat.pin":
 		msgID, err := strconv.Atoi(strings.TrimSpace(rest))
 		if err != nil || msgID == 0 {

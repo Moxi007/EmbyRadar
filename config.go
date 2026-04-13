@@ -51,30 +51,31 @@ type GlobalConfig struct {
 
 // GroupConfig 群组级独立配置，每个 Telegram 群组一份
 type GroupConfig struct {
-	TelegramChatID       int64            `json:"telegram_chat_id"`
-	EmbyURL              string           `json:"emby_url"`
-	EmbyAPIKey           string           `json:"emby_api_key"`
-	EmbyBossAPIUrl       string           `json:"embyboss_api_url"`
-	EmbyBossAPIToken     string           `json:"embyboss_api_token"`
-	EmbyBossCurrencyName string           `json:"embyboss_currency_name"`
-	ServerName           string           `json:"server_name"`
-	UpdateInterval       int              `json:"update_interval"`
-	WelcomeStickerID     string           `json:"welcome_sticker_id"`
-	WelcomeEmbyPrompt    string           `json:"welcome_emby_prompt"`
-	WelcomeCodePrompt    string           `json:"welcome_code_prompt"`
-	AIEnabled            bool             `json:"ai_enabled"`
-	AISearchEnabled      bool             `json:"ai_search_enabled"`
-	AISystemPrompt       string           `json:"ai_system_prompt"`
-	AITriggerKeywords    []string         `json:"ai_trigger_keywords"`
-	AIRoles              map[int64]string `json:"ai_roles"`
-	AIKnowledgeDir       string           `json:"ai_knowledge_dir"`
-	AIEmbyStatsFormat    string           `json:"ai_emby_stats_format"`
-	RequestEnabled       bool             `json:"request_enabled"`   // 求片功能开关，默认 false
-	RequestAdmins        []int64          `json:"request_admins"`    // 群组级求片管理员列表，为空时回退到全局 bot_admins
-	RequestCoinCost      int              `json:"request_coin_cost"` // 每次求片消耗货币数，默认 0（不消耗）
-	AIImageEnabled       bool             `json:"ai_image_enabled"`  // 图片生成开关，默认 false
-	AIImageModel         string           `json:"ai_image_model"`    // 图片生成模型名称，如 "dall-e-3"
-	AIImageSize          string           `json:"ai_image_size"`     // 图片尺寸，默认 "1024x1024"
+	TelegramChatID       int64             `json:"telegram_chat_id"`
+	EmbyURL              string            `json:"emby_url"`
+	EmbyAPIKey           string            `json:"emby_api_key"`
+	EmbyBossAPIUrl       string            `json:"embyboss_api_url"`
+	EmbyBossAPIToken     string            `json:"embyboss_api_token"`
+	EmbyBossCurrencyName string            `json:"embyboss_currency_name"`
+	ServerName           string            `json:"server_name"`
+	UpdateInterval       int               `json:"update_interval"`
+	WelcomeStickerID     string            `json:"welcome_sticker_id"`
+	WelcomeEmbyPrompt    string            `json:"welcome_emby_prompt"`
+	WelcomeCodePrompt    string            `json:"welcome_code_prompt"`
+	AIEnabled            bool              `json:"ai_enabled"`
+	AISearchEnabled      bool              `json:"ai_search_enabled"`
+	AISystemPrompt       string            `json:"ai_system_prompt"`
+	AITriggerKeywords    []string          `json:"ai_trigger_keywords"`
+	AIRoles              map[int64]string  `json:"ai_roles"`
+	AIStickers           map[string]string `json:"ai_stickers"`
+	AIKnowledgeDir       string            `json:"ai_knowledge_dir"`
+	AIEmbyStatsFormat    string            `json:"ai_emby_stats_format"`
+	RequestEnabled       bool              `json:"request_enabled"`   // 求片功能开关，默认 false
+	RequestAdmins        []int64           `json:"request_admins"`    // 群组级求片管理员列表，为空时回退到全局 bot_admins
+	RequestCoinCost      int               `json:"request_coin_cost"` // 每次求片消耗货币数，默认 0（不消耗）
+	AIImageEnabled       bool              `json:"ai_image_enabled"`  // 图片生成开关，默认 false
+	AIImageModel         string            `json:"ai_image_model"`    // 图片生成模型名称，如 "dall-e-3"
+	AIImageSize          string            `json:"ai_image_size"`     // 图片尺寸，默认 "1024x1024"
 }
 
 // GetGroupConfig 根据 chatID 查找群组配置，O(1) map 查找

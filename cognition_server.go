@@ -413,6 +413,7 @@ func (cs *CognitionServer) handleRespond(req *RespondRequest) (*RespondResponse,
 	if strings.TrimSpace(replyText) == "" {
 		replyText = "（思考了很久，不知道该说什么）"
 	}
+	replyText = cs.compactReplyIfNeeded(req, replyText)
 	_, _ = cs.db.Exec(`UPDATE episodes SET status = ?, tool_call_count = ?, updated_at_ms = ? WHERE id = ?`, "completed", len(transcript), nowMS(), episodeID)
 	_, _ = cs.db.Exec(
 		`INSERT INTO diary_entries (chat_id, user_id, content, summary, created_at_ms) VALUES (?, ?, ?, ?, ?)`,
@@ -443,6 +444,8 @@ func (cs *CognitionServer) runToolLoop(req *RespondRequest, systemPrompt, userPr
 		{Role: "user", Content: MessageContent{Text: userPrompt}},
 	}
 	transcript := make([]ToolTrace, 0, 8)
+	messageDeliveries := 0
+	stickerDeliveries := 0
 	runTool := Tool{
 		Type: "function",
 		Function: &ToolFunction{
@@ -485,9 +488,27 @@ func (cs *CognitionServer) runToolLoop(req *RespondRequest, systemPrompt, userPr
 				})
 				continue
 			}
+			command, budgetErr := cs.applyDeliveryBudgets(req, command, messageDeliveries, stickerDeliveries)
+			if budgetErr != nil {
+				output := budgetErr.Error()
+				transcript = append(transcript, ToolTrace{Command: command, Output: output})
+				messages = append(messages, ChatMessage{
+					Role:       "tool",
+					Name:       "run",
+					ToolCallID: call.ID,
+					Content:    MessageContent{Text: output},
+				})
+				continue
+			}
 			output, err := cs.executeRunCommand(command, req)
 			if err != nil {
 				output = fmt.Sprintf("tool error: %v", err)
+			}
+			if strings.HasPrefix(command, "chat.say") || strings.HasPrefix(command, "chat.reply") {
+				messageDeliveries++
+			}
+			if strings.HasPrefix(command, "chat.sticker") {
+				stickerDeliveries++
 			}
 			transcript = append(transcript, ToolTrace{Command: command, Output: output})
 			messages = append(messages, ChatMessage{
@@ -891,6 +912,9 @@ func (cs *CognitionServer) buildDynamicTail(req *RespondRequest) (string, error)
 	if len(req.JobSummaries) > 0 {
 		parts = append(parts, "当前任务摘要："+strings.Join(req.JobSummaries, "；"))
 	}
+	if len(req.StickerSummaries) > 0 {
+		parts = append(parts, "可用贴纸："+strings.Join(req.StickerSummaries, "；")+"。如需发送贴纸，使用 chat.sticker <别名>。")
+	}
 	return strings.Join(parts, "\n"), nil
 }
 
@@ -899,10 +923,14 @@ func (cs *CognitionServer) buildStaticPrompt(req *RespondRequest, voice string, 
 	return strings.Join([]string{
 		fallbackString(strings.TrimSpace(req.StaticPrompt), "你是 EmbyRadar 的自治型 AI 助手。"),
 		"人格种子：" + fallbackString(req.PersonaSeed, "谨慎、会长期记住关系变化、保持直接。") + "。",
-		"你使用单一工具 run(command)。命令空间仅限：chat.say、chat.reply、chat.pin、web.search、tmdb.search、emby.search、emby.latest、embyboss.user、skill.read、job.read、job.write、memory.search、diary.write。",
+		"你使用单一工具 run(command)。命令空间仅限：chat.say、chat.reply、chat.sticker、chat.pin、web.search、tmdb.search、emby.search、emby.latest、embyboss.user、skill.read、job.read、job.write、memory.search、diary.write。",
 		"复杂写入命令使用 JSON 作为参数体，例如：job.write {\"job_id\":\"daily-check\",\"content\":\"...\"}。",
 		"绝对禁止编造系统事实。需要外部事实时先用 run(command) 取证。",
 		"回复保持自然、简洁、像长期生活在群里的实体，不要自称在执行流程，也不要暴露 pressure、voice、tool budget 这些内部术语。",
+		"默认不要一口气发很长一段。更像真人聊天：一条消息尽量只说 1 到 2 句；有情绪、有解释、有追问时，可以拆成 2 到 3 条短消息连续发出，但不要刷屏。",
+		"如果你已经通过 chat.say、chat.reply 或 chat.sticker 把回复发出去了，最终可以不再输出额外正文，避免重复。",
+		"贴纸只在情绪明显、撒娇、安慰、活跃气氛时使用，不要每次都发，也不要把贴纸当成固定结尾。",
+		"不要自我重复，不要复述用户原话，不要写像客服或作文一样的收尾。能短就短，能直接就直接。",
 		fmt.Sprintf("当前主导倾向：%s。六维压力快照：%s。", voice, string(pressureJSON)),
 	}, "\n\n")
 }
@@ -922,6 +950,87 @@ func (cs *CognitionServer) buildUserPrompt(req *RespondRequest, dynamicTail stri
 	}
 	segments = append(segments, fmt.Sprintf("当前消息来自 %s：%s", fallbackString(req.UserName, fmt.Sprint(req.UserID)), req.Text))
 	return strings.Join(filterNonEmpty(segments), "\n\n")
+}
+
+func (cs *CognitionServer) applyDeliveryBudgets(req *RespondRequest, command string, messageDeliveries, stickerDeliveries int) (string, error) {
+	command = strings.TrimSpace(command)
+	switch {
+	case strings.HasPrefix(command, "chat.say"):
+		if messageDeliveries >= 3 {
+			return command, fmt.Errorf("message budget exceeded: 最多连续发送 3 条消息")
+		}
+		name, rest := splitCommand(command)
+		_ = name
+		return "chat.say " + cs.compactOutgoingMessage(req, rest), nil
+	case strings.HasPrefix(command, "chat.reply"):
+		if messageDeliveries >= 3 {
+			return command, fmt.Errorf("message budget exceeded: 最多连续发送 3 条消息")
+		}
+		name, rest := splitCommand(command)
+		_ = name
+		return "chat.reply " + cs.compactOutgoingMessage(req, rest), nil
+	case strings.HasPrefix(command, "chat.sticker"):
+		if stickerDeliveries >= 1 {
+			return command, fmt.Errorf("sticker budget exceeded: 单轮最多发送 1 张贴纸")
+		}
+		if !cs.shouldAllowSticker(req) {
+			return command, fmt.Errorf("sticker gate blocked: 当前情境不适合发送贴纸")
+		}
+	}
+	return command, nil
+}
+
+func (cs *CognitionServer) shouldAllowSticker(req *RespondRequest) bool {
+	text := strings.TrimSpace(req.Text)
+	emotion := cs.detectEmotion(text)
+	if emotion == "negative" || emotion == "positive" {
+		return true
+	}
+	return containsAny(text, "哭", "难过", "委屈", "抱抱", "可爱", "紧张", "开心", "哈哈", "呜呜", "对不起", "没事吧")
+}
+
+func (cs *CognitionServer) compactOutgoingMessage(req *RespondRequest, text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" || cs.wantsDetailedAnswer(req.Text) {
+		return text
+	}
+	text = cs.limitSentences(text, 2)
+	text = truncateString(text, 120)
+	return strings.TrimSpace(text)
+}
+
+func (cs *CognitionServer) compactReplyIfNeeded(req *RespondRequest, text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" || cs.wantsDetailedAnswer(req.Text) {
+		return text
+	}
+	if len(text) <= 120 && strings.Count(text, "\n") <= 1 {
+		return text
+	}
+	text = cs.limitSentences(text, 3)
+	text = truncateString(text, 180)
+	return strings.TrimSpace(text)
+}
+
+func (cs *CognitionServer) wantsDetailedAnswer(text string) bool {
+	return containsAny(text, "详细", "具体", "步骤", "教程", "如何", "怎么", "为什么", "分析", "总结", "列出", "帮我写", "解释", "说明")
+}
+
+func (cs *CognitionServer) limitSentences(text string, maxSentences int) string {
+	if maxSentences <= 0 {
+		return text
+	}
+	count := 0
+	for i, r := range text {
+		switch r {
+		case '。', '！', '？', '!', '?', '\n':
+			count++
+			if count >= maxSentences {
+				return strings.TrimSpace(text[:i+len(string(r))])
+			}
+		}
+	}
+	return text
 }
 
 func (cs *CognitionServer) claimAction() (*PlannedAction, error) {

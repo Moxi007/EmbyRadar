@@ -68,6 +68,7 @@ type RespondRequest struct {
 	RecentContext      []CognitionMessage `json:"recent_context,omitempty"`
 	SkillSummaries     []string           `json:"skill_summaries,omitempty"`
 	JobSummaries       []string           `json:"job_summaries,omitempty"`
+	StickerSummaries   []string           `json:"sticker_summaries,omitempty"`
 	KnowledgeSummary   string             `json:"knowledge_summary,omitempty"`
 }
 
