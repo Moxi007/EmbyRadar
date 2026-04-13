@@ -1,10 +1,6 @@
 # EmbyRadar Docker 使用指南
 
-本项目现在是双进程架构：
-- `embyradar`：Go 主程序，负责 Telegram、Emby、TMDB、求片流转
-- `cognition`：Node/TS sidecar，负责记忆、人格、线程、工具调用与主动行为
-
-如果只启动 `embyradar`，主程序会在启动时探活 `cognition`，探活失败就直接退出。
+本项目现在使用纯 Go 主程序，`cognition` 已内嵌到 `embyradar` 进程内，不再需要单独部署 Node sidecar 容器。
 
 ## 1. 环境准备
 
@@ -18,7 +14,6 @@
 EmbyRadar/
 ├── config/
 │   └── config.json
-├── cognition_data/
 ├── logs/
 ├── qdrant_data/
 └── docker-compose.yml
@@ -31,7 +26,7 @@ EmbyRadar/
 ```json
 {
   "cognition_enabled": true,
-  "cognition_base_url": "http://cognition:3400",
+  "cognition_base_url": "http://127.0.0.1:3400",
   "cognition_db_path": "config/cognition.db",
   "autonomy_enabled": true,
   "autonomy_tick_seconds": 300,
@@ -43,36 +38,47 @@ EmbyRadar/
 ```
 
 关键点：
-- 在 Docker Compose 网络里，`cognition_base_url` 必须写成 `http://cognition:3400`
-- 不要写 `http://127.0.0.1:3400`
-- `127.0.0.1` 在容器里指向当前容器自己，不会指向 `cognition` 服务
+- `cognition_base_url` 现在指向主进程内部自启的 Go cognition 服务
+- Docker 和本地运行都统一使用 `http://127.0.0.1:3400`
+- 不再需要 `http://cognition:3400`
 
-## 3. 启动方式
+## 3. 镜像发布
 
-在项目根目录运行：
+Docker Hub 只需要一个镜像：
+- `lfy1680/embyradar:beta`
+
+示例：
 
 ```bash
-docker compose up -d --build
+docker build -t lfy1680/embyradar:beta .
+docker push lfy1680/embyradar:beta
+```
+
+## 4. 启动方式
+
+在部署机上运行：
+
+```bash
+docker compose up -d
+```
+
+如果你要临时覆盖镜像标签，也可以：
+
+```bash
+EMBYRADAR_IMAGE=lfy1680/embyradar:beta docker compose up -d
 ```
 
 该命令会：
-1. 构建 `embyradar` 主服务镜像
-2. 构建 `cognition` sidecar 镜像
-3. 启动 `qdrant`
-4. 将 sidecar 的 SQLite 数据持久化到 `./cognition_data`
+1. 拉取 `embyradar` 主服务镜像
+2. 启动 `qdrant`
+3. 将配置和日志目录挂载到容器内
 
-## 4. 查看日志
+## 5. 查看日志
 
 查看全部服务：
 
 ```bash
 docker compose logs -f
-```
-
-只看 cognition：
-
-```bash
-docker compose logs -f cognition
 ```
 
 只看主程序：
@@ -81,7 +87,7 @@ docker compose logs -f cognition
 docker compose logs -f embyradar
 ```
 
-## 5. 停止与清理
+## 6. 停止与清理
 
 停止服务：
 
@@ -89,20 +95,16 @@ docker compose logs -f embyradar
 docker compose down
 ```
 
-如果只想重启某个服务：
+重启主程序：
 
 ```bash
-docker compose restart cognition
 docker compose restart embyradar
 ```
 
-## 6. 常见问题
+## 7. 常见问题
 
-- 报错 `connect: connection refused` 到 `127.0.0.1:3400`
-  说明你把 `cognition_base_url` 写成了容器内回环地址，或者根本没启动 `cognition` 服务。
-
-- 只拉了 `lfy1680/embyradar:beta` 这种单镜像
-  这个项目现在不是单容器架构，必须同时部署 sidecar。仅主程序镜像不足以运行完整 AI 链路。
+- 报错 `cognition 服务不可用`
+  说明主程序内部的 cognition 自启动失败，优先检查 `cognition_db_path` 是否可写，以及端口 `3400` 是否被容器内其他进程占用。
 
 - 修改了 `config.json` 但没生效
   重启 `embyradar` 即可：

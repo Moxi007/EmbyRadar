@@ -26,7 +26,3 @@ embyradar
 
 # Kiro spec 和配置文件
 .kiro/
-
-# Cognition sidecar runtime artifacts
-cognition/node_modules/
-cognition/config/

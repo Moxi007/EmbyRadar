@@ -1,16 +1,11 @@
 services:
   embyradar:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: embyradar:local
+    image: ${EMBYRADAR_IMAGE:-lfy1680/embyradar:beta}
     container_name: embyradar
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
     depends_on:
-      cognition:
-        condition: service_started
       qdrant:
         condition: service_started
     volumes:
@@ -18,22 +13,6 @@ services:
       - ./logs:/app/logs
     ports:
       - "8088:8080"
-
-  cognition:
-    build:
-      context: ./cognition
-      dockerfile: Dockerfile
-    image: embyradar-cognition:local
-    container_name: embyradar-cognition
-    restart: unless-stopped
-    environment:
-      - TZ=Asia/Shanghai
-      - PORT=3400
-      - COGNITION_DB_PATH=/data/cognition.db
-    volumes:
-      - ./cognition_data:/data
-    ports:
-      - "3400:3400"
 
   qdrant:
     image: qdrant/qdrant:latest

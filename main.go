@@ -57,6 +57,13 @@ func main() {
 	}
 	if hasAIEnabled {
 		aiClient := NewAIClient(&appConfig.Global)
+		cognitionServer, err := NewCognitionServer(&appConfig.Global)
+		if err != nil {
+			log.Fatalf("初始化 cognition 服务失败: %v", err)
+		}
+		if err := cognitionServer.Start(); err != nil {
+			log.Fatalf("启动 cognition 服务失败: %v", err)
+		}
 		cognitionClient := NewCognitionClient(appConfig.Global.CognitionBaseURL)
 		if err := cognitionClient.HealthCheck(); err != nil {
 			log.Fatalf("cognition 服务不可用，启动中止: %v", err)
@@ -150,6 +157,7 @@ func main() {
 		}
 		poller.Stop()
 		store.Close()
+		_ = cognitionServer.Close()
 		log.Printf("数据库和轮询器已关闭，程序退出")
 	} else {
 		log.Printf("[AI] AI 聊天模块未启用")
