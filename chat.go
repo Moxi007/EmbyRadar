@@ -259,7 +259,7 @@ func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName 
 		log.Printf("[AI] 欢迎新成员 cognition 调用失败: %v", err)
 		return
 	}
-	reply := resp.ReplyText
+	reply := sanitizeChatText(resp.ReplyText)
 
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
@@ -956,8 +956,8 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		"display_role_raw": displayRole,
 	})
 
-	// 创建 150s 超时 context，确保不会无限等待
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	// 创建 300s 超时 context（5分钟），确保不会无限等待
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	// 启动 typing 心跳：每 4s 发送一次 "正在输入..."，向用户表明 bot 仍在思考
@@ -985,7 +985,7 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		return
 	}
 
-	reply := strings.TrimSpace(resp.ReplyText)
+	reply := sanitizeChatText(resp.ReplyText)
 	toolDelivered := hasDeliveredConversation(resp.ToolTranscript)
 	if reply == "" && !toolDelivered {
 		reply = "（思考了很久，不知道该说什么）"

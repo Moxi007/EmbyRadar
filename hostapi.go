@@ -95,7 +95,7 @@ func (he *HostEngine) Execute(command string, ctx HostCommandContext) (string, i
 
 	switch name {
 	case "chat.say":
-		text := strings.TrimSpace(rest)
+		text := sanitizeChatText(rest)
 		if text == "" {
 			return "", 0, fmt.Errorf("chat.say 需要消息内容")
 		}
@@ -108,7 +108,7 @@ func (he *HostEngine) Execute(command string, ctx HostCommandContext) (string, i
 		})
 		return "消息已发送", messageID, nil
 	case "chat.reply":
-		text := strings.TrimSpace(rest)
+		text := sanitizeChatText(rest)
 		if text == "" {
 			return "", 0, fmt.Errorf("chat.reply 需要消息内容")
 		}
@@ -211,6 +211,55 @@ func (he *HostEngine) Execute(command string, ctx HostCommandContext) (string, i
 	default:
 		return "", 0, fmt.Errorf("不支持的宿主命令: %s", name)
 	}
+}
+
+// sanitizeChatText 清洗 AI 输出的消息文本。
+// AI 模型有时会将 chat.say 的参数包裹在 JSON 或引号中，例如：
+//   - {"text":"你好"} → 你好
+//   - {"thought":"内部推理","text":"你好"} → 你好（丢弃 thought）
+//   - {"thought":"内部推理"} → ""（纯思维链，不应发出）
+//   - "你好" → 你好
+//   - 你好 → 你好（保持不变）
+func sanitizeChatText(raw string) string {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return ""
+	}
+
+	// 情况1：JSON 格式
+	if strings.HasPrefix(text, "{") {
+		var payload map[string]any
+		if json.Unmarshal([]byte(text), &payload) == nil {
+			// 如果有 text 字段，提取出来（忽略 thought 等内部字段）
+			if t, ok := payload["text"].(string); ok && strings.TrimSpace(t) != "" {
+				return strings.TrimSpace(t)
+			}
+			// 如果有 content 字段（另一种常见格式）
+			if c, ok := payload["content"].(string); ok && strings.TrimSpace(c) != "" {
+				return strings.TrimSpace(c)
+			}
+			// 仅有 thought / reasoning 等内部字段，不应发送给用户
+			if _, hasThought := payload["thought"]; hasThought {
+				return ""
+			}
+			if _, hasReasoning := payload["reasoning"]; hasReasoning {
+				return ""
+			}
+		}
+	}
+
+	// 情况2：整体被引号包裹 "..."
+	if len(text) >= 2 && text[0] == '"' && text[len(text)-1] == '"' {
+		unquoted := text[1 : len(text)-1]
+		// 处理转义字符
+		unquoted = strings.ReplaceAll(unquoted, `\"`, `"`)
+		unquoted = strings.ReplaceAll(unquoted, `\\`, `\`)
+		if strings.TrimSpace(unquoted) != "" {
+			return strings.TrimSpace(unquoted)
+		}
+	}
+
+	return text
 }
 
 func splitCommand(input string) (string, string) {

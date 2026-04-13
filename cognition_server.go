@@ -281,8 +281,8 @@ func (cs *CognitionServer) handleEvents(w http.ResponseWriter, r *http.Request) 
 }
 
 func (cs *CognitionServer) handleRespondHTTP(w http.ResponseWriter, r *http.Request) {
-	// HTTP 适配层：注入 150s 超时，确保服务端比客户端先完成
-	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
+	// HTTP 适配层：注入 300s 超时，确保服务端比客户端先完成
+	ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
 	defer cancel()
 
 	if r.Method != http.MethodPost {
@@ -1044,7 +1044,7 @@ func (cs *CognitionServer) shouldAllowSticker(req *RespondRequest) bool {
 }
 
 func (cs *CognitionServer) compactOutgoingMessage(req *RespondRequest, text string) string {
-	text = strings.TrimSpace(text)
+	text = sanitizeChatText(text) // 先清洗 JSON 包裹和引号
 	if text == "" || cs.wantsDetailedAnswer(req.Text) {
 		return text
 	}
@@ -1054,7 +1054,7 @@ func (cs *CognitionServer) compactOutgoingMessage(req *RespondRequest, text stri
 }
 
 func (cs *CognitionServer) compactReplyIfNeeded(req *RespondRequest, text string) string {
-	text = strings.TrimSpace(text)
+	text = sanitizeChatText(text) // 先清洗 JSON 包裹和引号
 	if text == "" || cs.wantsDetailedAnswer(req.Text) {
 		return text
 	}
@@ -1245,19 +1245,20 @@ func (cs *CognitionServer) coerceIntent(raw string) *RequestIntentResponse {
 }
 
 func (cs *CognitionServer) extractAssistantText(msg *ChatMessage) string {
+	var raw string
 	if strings.TrimSpace(msg.Content.Text) != "" {
-		return strings.TrimSpace(msg.Content.Text)
-	}
-	if len(msg.Content.Parts) == 0 {
-		return ""
-	}
-	lines := make([]string, 0, len(msg.Content.Parts))
-	for _, part := range msg.Content.Parts {
-		if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
-			lines = append(lines, strings.TrimSpace(part.Text))
+		raw = strings.TrimSpace(msg.Content.Text)
+	} else if len(msg.Content.Parts) > 0 {
+		lines := make([]string, 0, len(msg.Content.Parts))
+		for _, part := range msg.Content.Parts {
+			if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+				lines = append(lines, strings.TrimSpace(part.Text))
+			}
 		}
+		raw = strings.TrimSpace(strings.Join(lines, "\n"))
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	// 清洗 AI 可能输出的 JSON 包裹、引号、思维链等
+	return sanitizeChatText(raw)
 }
 
 func (cs *CognitionServer) detectEmotion(text string) string {
