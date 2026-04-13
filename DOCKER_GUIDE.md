@@ -1,51 +1,112 @@
 # EmbyRadar Docker 使用指南
 
-本指南详细介绍了如何使用 Docker 部署和运行 `EmbyRadar`。
+本项目现在是双进程架构：
+- `embyradar`：Go 主程序，负责 Telegram、Emby、TMDB、求片流转
+- `cognition`：Node/TS sidecar，负责记忆、人格、线程、工具调用与主动行为
+
+如果只启动 `embyradar`，主程序会在启动时探活 `cognition`，探活失败就直接退出。
 
 ## 1. 环境准备
 
-确保您的系统中已安装以下软件：
+确保您的系统中已安装：
 - Docker
 - Docker Compose
 
-**目录结构准备：**
-项目根目录下应包含一个 `config` 文件夹，其中存放 `config.json`：
+建议目录结构：
+
 ```text
 EmbyRadar/
 ├── config/
 │   └── config.json
+├── cognition_data/
+├── logs/
+├── qdrant_data/
 └── docker-compose.yml
 ```
 
-## 2. 核心配置文件说明
+## 2. 配置要点
 
-- **Dockerfile**: 采用多阶段构建，确保镜像体积最小化并包含必要证书。
-- **docker-compose.yml**: 将宿主机的 `./config` 目录挂载到容器的 `/app/config`。
-- **.dockerignore**: 排除不必要的文件，加速镜像构建。
+`config/config.json` 中至少需要包含以下新字段：
 
-## 3. 部署步骤
-
-### 本地构建并启动
-在项目根目录下运行：
-```bash
-docker-compose up -d --build
+```json
+{
+  "cognition_enabled": true,
+  "cognition_base_url": "http://cognition:3400",
+  "cognition_db_path": "config/cognition.db",
+  "autonomy_enabled": true,
+  "autonomy_tick_seconds": 300,
+  "quiet_hours": [0, 1, 2, 3, 4, 5, 6],
+  "proactive_cooldown_minutes": 720,
+  "persona_seed": "记住群内长期关系变化，按群人设稳定说话，优先直接、克制、像常驻群成员。",
+  "relationship_decay_days": 14
+}
 ```
+
+关键点：
+- 在 Docker Compose 网络里，`cognition_base_url` 必须写成 `http://cognition:3400`
+- 不要写 `http://127.0.0.1:3400`
+- `127.0.0.1` 在容器里指向当前容器自己，不会指向 `cognition` 服务
+
+## 3. 启动方式
+
+在项目根目录运行：
+
+```bash
+docker compose up -d --build
+```
+
 该命令会：
-1. 构建镜像并运行容器。
-2. 自动在 `config/` 目录下生成 `message_id.json` 缓存文件。
+1. 构建 `embyradar` 主服务镜像
+2. 构建 `cognition` sidecar 镜像
+3. 启动 `qdrant`
+4. 将 sidecar 的 SQLite 数据持久化到 `./cognition_data`
 
-### 查看日志
+## 4. 查看日志
+
+查看全部服务：
+
 ```bash
-docker-compose logs -f
+docker compose logs -f
 ```
 
-### 停止并移除容器
+只看 cognition：
+
 ```bash
-docker-compose down
+docker compose logs -f cognition
 ```
 
-## 4. 常见问题 (FAQ)
+只看主程序：
 
-- **时区问题**: 默认时区已设置为 `Asia/Shanghai`。如果需要更改，请在 `docker-compose.yml` 的 `environment` 部分修改 `TZ` 变量。
-- **配置未生效**: `config.json` 以只读方式挂载。修改宿主机上的文件后，通常需要重启容器：`docker-compose restart`。
-- **消息重复发送**: 请确保 `message_id.json` 已正确挂载。如果该文件丢失，程序会重新发送一段置顶消息。
+```bash
+docker compose logs -f embyradar
+```
+
+## 5. 停止与清理
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+如果只想重启某个服务：
+
+```bash
+docker compose restart cognition
+docker compose restart embyradar
+```
+
+## 6. 常见问题
+
+- 报错 `connect: connection refused` 到 `127.0.0.1:3400`
+  说明你把 `cognition_base_url` 写成了容器内回环地址，或者根本没启动 `cognition` 服务。
+
+- 只拉了 `lfy1680/embyradar:beta` 这种单镜像
+  这个项目现在不是单容器架构，必须同时部署 sidecar。仅主程序镜像不足以运行完整 AI 链路。
+
+- 修改了 `config.json` 但没生效
+  重启 `embyradar` 即可：
+
+```bash
+docker compose restart embyradar
+```

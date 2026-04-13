@@ -1,20 +1,40 @@
 services:
   embyradar:
-    image: lfy1680/embyradar:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: embyradar:local
     container_name: embyradar
-    network_mode: host
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
+    depends_on:
+      cognition:
+        condition: service_started
+      qdrant:
+        condition: service_started
     volumes:
-      # 挂载 config 目录，包含 config.json 和自动生成的 message_id.json
       - ./config:/app/config
-      # 挂载 logs 目录，持久化日志文件
       - ./logs:/app/logs
+    ports:
+      - "8088:8080"
 
-  # ====== [方案三可选] Qdrant 向量数据库 ======
-  # 用于为 EmbyRadar 提供 AI 的长久混合记忆功能
-  # 开启前提：在 config.json 中配置 "qdrant_url" 并填入 "embedding_api_url" 等参数
+  cognition:
+    build:
+      context: ./cognition
+      dockerfile: Dockerfile
+    image: embyradar-cognition:local
+    container_name: embyradar-cognition
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=3400
+      - COGNITION_DB_PATH=/data/cognition.db
+    volumes:
+      - ./cognition_data:/data
+    ports:
+      - "3400:3400"
+
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
