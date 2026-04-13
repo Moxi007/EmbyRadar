@@ -57,6 +57,11 @@ func main() {
 	}
 	if hasAIEnabled {
 		aiClient := NewAIClient(&appConfig.Global)
+		cognitionClient := NewCognitionClient(appConfig.Global.CognitionBaseURL)
+		if err := cognitionClient.HealthCheck(); err != nil {
+			log.Fatalf("cognition 服务不可用，启动中止: %v", err)
+		}
+
 		ctxManager := NewContextManager(appConfig.Global.AIMaxContext)
 
 		// 初始化 SQLite 数据库
@@ -73,6 +78,10 @@ func main() {
 		requestHandler := NewRequestHandler(store)
 
 		chatHandler := NewChatHandler(bot, aiClient, ctxManager, appConfig, requestHandler)
+		chatHandler.SetCognitionClient(cognitionClient)
+
+		hostEngine := NewHostEngine(chatHandler)
+		hostEngine.Start()
 
 		// --------- [方案三] 向量记忆引擎 ---------
 		var memoryStore *MemoryStore
@@ -92,6 +101,16 @@ func main() {
 		poller := NewPoller(store, chatHandler.embyMap, bot, 30*time.Minute)
 		poller.Start()
 
+		var proactiveWorker *ProactiveActionWorker
+		if appConfig.Global.AutonomyEnabled {
+			proactiveWorker = NewProactiveActionWorker(
+				cognitionClient,
+				hostEngine,
+				time.Duration(appConfig.Global.AutonomyTickSecs)*time.Second,
+			)
+			proactiveWorker.Start()
+		}
+
 		// 在独立 goroutine 中启动消息监听
 		go chatHandler.StartListening()
 
@@ -103,42 +122,13 @@ func main() {
 		// 启动每日摘要调度器（方案四长久记忆核心）
 		var digestScheduler *DigestScheduler
 		if appConfig.Global.DigestEnabled {
-			digestScheduler = NewDigestScheduler(aiClient, ctxManager, appConfig, memoryStore)
+			digestScheduler = NewDigestScheduler(cognitionClient, ctxManager, appConfig, memoryStore)
 			if digestScheduler != nil {
 				digestScheduler.Start()
 			}
 		}
 
-		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", appConfig.Global.AIModel)
-
-		// 启动 AI 心跳定时器（15 分钟），用于触发 Jobs 自治任务检查
-		heartbeatTicker := time.NewTicker(15 * time.Minute)
-		go func() {
-			for range heartbeatTicker.C {
-				// 只在有活跃任务时才触发心跳
-				if chatHandler.jobsLoader != nil && len(chatHandler.jobsLoader.ListActiveJobs()) > 0 {
-					log.Printf("[心跳] 检测到 %d 个活跃任务，触发 AI 自检...", len(chatHandler.jobsLoader.ListActiveJobs()))
-					// 向第一个配置的群组发送系统级心跳消息
-					if len(appConfig.Groups) > 0 {
-						firstGroup := appConfig.Groups[0]
-						heartbeatMsg := chatHandler.buildMessages(
-							firstGroup.TelegramChatID,
-							"系统心跳",
-							"系统最高权限",
-							"[系统心跳] 请检查你的活跃任务列表，如果有需要执行的任务，请主动执行。如果所有任务都在计划内且不需要立即行动，简短回复'已检查，无需操作'即可。",
-							"",
-							nil,
-						)
-						replyMsg, err := aiClient.ChatCompletion(heartbeatMsg, nil)
-						if err != nil {
-							log.Printf("[心跳] AI 自检调用失败: %v", err)
-						} else {
-							log.Printf("[心跳] AI 自检结果: %s", replyMsg.Content.Text)
-						}
-					}
-				}
-			}
-		}()
+		log.Printf("[AI] cognition 主链路已启动 (模型: %s, cognition: %s)", appConfig.Global.AIModel, appConfig.Global.CognitionBaseURL)
 
 		// 注册快捷命令菜单
 		setBotCommands(bot, appConfig)
@@ -154,6 +144,9 @@ func main() {
 		log.Printf("收到退出信号 %v，正在优雅退出...", sig)
 		if digestScheduler != nil {
 			digestScheduler.Stop()
+		}
+		if proactiveWorker != nil {
+			proactiveWorker.Stop()
 		}
 		poller.Stop()
 		store.Close()

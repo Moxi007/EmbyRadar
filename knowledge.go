@@ -151,7 +151,7 @@ func (kb *KnowledgeBase) AddEntry(name, content string) error {
 // 若文件已存在，将新内容与旧内容通过 AI 进行语义合并和去重
 // 若文件不存在，创建新文件
 // 返回 (isNew bool, err error)
-func (kb *KnowledgeBase) MergeEntry(name, newContent string, aiClient *AIClient) (bool, error) {
+func (kb *KnowledgeBase) MergeEntry(name, newContent string, cognition *CognitionClient, llm LLMConfig) (bool, error) {
 	// 防御性检查，防止路径穿越
 	name = filepath.Base(name)
 	if name == "" || name == "." || name == "/" {
@@ -181,7 +181,7 @@ func (kb *KnowledgeBase) MergeEntry(name, newContent string, aiClient *AIClient)
 
 	// 文件已存在，尝试 AI 合并
 	oldContent := string(existingData)
-	mergedContent, err := mergeWithAI(aiClient, oldContent, newContent)
+	mergedContent, err := mergeWithAI(cognition, llm, oldContent, newContent)
 	if err != nil {
 		// AI 合并失败，回退到简单文本追加
 		log.Printf("[知识库] AI 合并失败，回退到文本追加: %v", err)
@@ -196,9 +196,9 @@ func (kb *KnowledgeBase) MergeEntry(name, newContent string, aiClient *AIClient)
 }
 
 // mergeWithAI 使用 AI 对新旧内容进行语义合并和去重
-func mergeWithAI(aiClient *AIClient, oldContent, newContent string) (string, error) {
-	if aiClient == nil {
-		return "", fmt.Errorf("AI 客户端未初始化")
+func mergeWithAI(cognition *CognitionClient, llm LLMConfig, oldContent, newContent string) (string, error) {
+	if cognition == nil {
+		return "", fmt.Errorf("cognition 客户端未初始化")
 	}
 
 	prompt := fmt.Sprintf("你是一个知识库合并助手。请将以下【已有内容】和【新增内容】进行智能合并：\n"+
@@ -208,15 +208,16 @@ func mergeWithAI(aiClient *AIClient, oldContent, newContent string) (string, err
 		"4. 直接输出合并后的完整内容，不要包含任何前言或解释\n\n"+
 		"【已有内容】：\n%s\n\n【新增内容】：\n%s", oldContent, newContent)
 
-	msg, err := aiClient.ChatCompletion([]ChatMessage{
-		{Role: "system", Content: MessageContent{Text: "你是一个专业的知识库合并引擎，负责将新旧内容智能合并。"}},
-		{Role: "user", Content: MessageContent{Text: prompt}},
-	}, nil)
+	result, err := cognition.TransformText("/cognition/merge-knowledge", &TextTransformRequest{
+		LLM:        llm,
+		SystemHint: "你是一个专业的知识库合并引擎，负责将新旧内容智能合并。",
+		UserText:   prompt,
+	})
 	if err != nil {
 		return "", err
 	}
 
-	result := strings.TrimSpace(msg.Content.Text)
+	result = strings.TrimSpace(result)
 	if result == "" {
 		return "", fmt.Errorf("AI 返回空内容")
 	}

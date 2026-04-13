@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -25,13 +24,14 @@ type ChatHandler struct {
 	tmdbMap        map[int64]*TMDBClient     // chatID → 独立 TMDB 客户端
 	requestHandler *RequestHandler           // 全局求片处理器
 	memoryStore    *MemoryStore              // 向量记忆存储 (可为 nil)
+	cognition      *CognitionClient
+	transport      TransportExecutor
 
 	// 架构增强组件
-	sessionMgr      *SessionManager   // 会话队列管理器（防并发）
-	middlewareChain *MiddlewareChain  // Prompt 中间件链
-	toolRegistry    *ToolRegistry     // 工具注册中心
-	skillsLoader    *SkillsLoader     // 技能加载器 (可为 nil)
-	jobsLoader      *JobsLoader       // 任务加载器 (可为 nil)
+	sessionMgr   *SessionManager // 会话队列管理器（防并发）
+	toolRegistry *ToolRegistry   // 工具注册中心
+	skillsLoader *SkillsLoader   // 技能加载器 (可为 nil)
+	jobsLoader   *JobsLoader     // 任务加载器 (可为 nil)
 }
 
 // NewChatHandler 创建聊天处理器，遍历所有群组配置初始化各群组的独立客户端
@@ -47,6 +47,7 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 		ebMap:          make(map[int64]*EmbyBossClient),
 		tmdbMap:        make(map[int64]*TMDBClient),
 		requestHandler: requestHandler,
+		transport:      NewTelegramTransport(bot),
 	}
 
 	// 初始化通用知识库（所有群组共享，路径固定为 config/knowledge）
@@ -82,10 +83,6 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 		ch.kbMap[chatID] = kb
 	}
 
-	// 初始化 Prompt 中间件链
-	ch.middlewareChain = DefaultMiddlewareChain()
-	ch.middlewareChain.LogMiddlewares()
-
 	// 初始化工具注册中心
 	ch.toolRegistry = DefaultToolRegistry()
 
@@ -111,6 +108,10 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 // SetMemoryStore 注入全局向量记忆存储
 func (ch *ChatHandler) SetMemoryStore(store *MemoryStore) {
 	ch.memoryStore = store
+}
+
+func (ch *ChatHandler) SetCognitionClient(client *CognitionClient) {
+	ch.cognition = client
 }
 
 // getCurrencyName 获取群组配置的货币名称
@@ -208,8 +209,6 @@ func (ch *ChatHandler) handleMyChatMember(update *tgbotapi.ChatMemberUpdated) {
 	}
 }
 
-
-
 // NotifyNewEmbyUser 在发送贴纸并调用 AI 欢迎新主子/平民
 func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName string, embyName string) {
 	tgName = cleanMarkdownName(tgName)
@@ -232,16 +231,33 @@ func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName 
 		welcomePrompt = fmt.Sprintf(group.WelcomeCodePrompt, displayRole)
 	}
 
-	// 构建一次性消息调用 AI，赋予"系统最高权限"以防被 AI 当作伪造消息拦截
-	// 欢迎消息不涉及媒体内容，media 传 nil
-	messages := ch.buildMessages(group.TelegramChatID, "系统通报", "系统最高权限", welcomePrompt, "", nil)
-
-	replyMsg, err := ch.aiClient.ChatCompletion(messages, nil)
-	if err != nil {
-		log.Printf("[AI] 欢迎新成员调用 AI 失败: %v", err)
+	if ch.cognition == nil {
+		log.Printf("[AI] cognition 未初始化，无法生成欢迎语")
 		return
 	}
-	reply := replyMsg.Content.Text
+	resp, err := ch.cognition.Respond(&RespondRequest{
+		LLM:                ch.llmConfig(),
+		EngineBaseURL:      defaultEngineBaseURL(),
+		StaticPrompt:       group.AISystemPrompt,
+		PersonaSeed:        ch.appConfig.Global.PersonaSeed,
+		QuietHours:         ch.appConfig.Global.QuietHours,
+		ProactiveCooldownM: ch.appConfig.Global.ProactiveCooldownMinutes,
+		RelationshipDecayD: ch.appConfig.Global.RelationshipDecayDays,
+		ChatID:             group.TelegramChatID,
+		UserID:             tgID,
+		UserName:           tgName,
+		IsPrivate:          false,
+		AllowSensitive:     true,
+		Text:               welcomePrompt,
+		KnowledgeSummary:   ch.summarizeKnowledge(group.TelegramChatID),
+		SkillSummaries:     ch.summarizeSkills(),
+		JobSummaries:       ch.summarizeJobs(),
+	})
+	if err != nil {
+		log.Printf("[AI] 欢迎新成员 cognition 调用失败: %v", err)
+		return
+	}
+	reply := resp.ReplyText
 
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
@@ -368,23 +384,25 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 			formatPrompt := "你现在是一个知识库整理助手。请将用户提供的以下内容进行提炼和格式化，使其最适合作为机器人的知识库（Wiki）供日后检索使用。" +
 				"要求：\n1. 剔除对话中的闲聊成分，只保留核心事实或步骤。\n2. 如果适合，请尽量使用结构化的 Q&A (问答)格式或条理清晰的列表格式。\n3. 直接输出整理后的内容，不要包含任何前言或解释词汇。\n\n需要整理的内容如下：\n" + content
 
-			formattedMsg, err := ch.aiClient.ChatCompletion([]ChatMessage{
-				{Role: "system", Content: MessageContent{Text: "你是一个专业的知识库摘要引擎。"}},
-				{Role: "user", Content: MessageContent{Text: formatPrompt}},
-			}, nil)
-
 			formattedContent := ""
-			if err == nil && formattedMsg != nil {
-				formattedContent = formattedMsg.Content.Text
+			if ch.cognition != nil {
+				transformed, err := ch.cognition.TransformText("/cognition/format-knowledge", &TextTransformRequest{
+					LLM:        ch.llmConfig(),
+					SystemHint: "你是一个专业的知识库摘要引擎。",
+					UserText:   formatPrompt,
+				})
+				if err == nil {
+					formattedContent = transformed
+				} else {
+					log.Printf("[Cognition] 知识库格式化失败，将使用原始文本: %v", err)
+				}
 			}
 
-			if err == nil && strings.TrimSpace(formattedContent) != "" {
+			if strings.TrimSpace(formattedContent) != "" {
 				content = formattedContent
-			} else {
-				log.Printf("[AI] 格式化知识库失败，将使用原始文本: %v", err)
 			}
 
-			isNew, err := kb.MergeEntry(name, content, ch.aiClient)
+			isNew, err := kb.MergeEntry(name, content, ch.cognition, ch.llmConfig())
 			if err != nil {
 				if sentMsg.MessageID != 0 {
 					editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, fmt.Sprintf("❌ 添加知识库条目失败: %v", err))
@@ -896,125 +914,62 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 	}
 
-	// 取消之前硬编码的关键字前置拦截逻辑，不再自动为每一句聊天请求用户资产。
-	// 改为提供专属的 AI 工具 (get_user_info) 让 AI 在需要时自行发问。
-	var embyBossData string
-
-	// 构建消息列表，传入媒体内容（无媒体时 media 为 nil）
-	messages := ch.buildMessages(chatID, displayRole, verifiedRole, userText, embyBossData, media)
-
-	// 构建工具执行上下文
 	isSensitiveAllowed := ch.canQuerySensitiveInfo(msg)
 	isGroupChat := msg.Chat != nil && (msg.Chat.Type == "group" || msg.Chat.Type == "supergroup")
-	toolCtx := &ToolContext{
-		ChatID:                chatID,
-		SenderID:              senderID,
-		Msg:                   msg,
-		Group:                 group,
-		AppConfig:             ch.appConfig,
-		IsPrivate:             !isGroupChat,
-		EmbyClient:            ch.embyMap[chatID],
-		EBClient:              ch.ebMap[chatID],
-		TMDBClient:            ch.tmdbMap[chatID],
-		AIClient:              ch.aiClient,
-		ChatHandler:           ch,
-		IsSensitiveAllowed:    isSensitiveAllowed,
-		AllowSensitiveDetails: isSensitiveAllowed && !isGroupChat,
-	}
-
-	// Gemini 特殊处理：注入原生 Google Search Grounding（不经过 ToolRegistry）
-	var finalTools []Tool
-	if group.AISearchEnabled {
-		modelName := strings.ToLower(ch.appConfig.Global.AIModel)
-		if strings.Contains(modelName, "gemini") {
-			finalTools = append(finalTools, Tool{
-				Type:         "google_search",
-				GoogleSearch: map[string]any{},
-			})
-			log.Printf("[AI] 检测到 Gemini 模型并开启原生检索，注入 Google Search Grounding 参数...")
+	if media != nil {
+		if media.IsVideo {
+			userText = "[用户发送了一个视频] " + userText
 		} else {
-			log.Printf("[AI] 启用本地 DuckDuckGo search_web 工具...")
+			userText = "[用户发送了一张图片] " + userText
 		}
 	}
 
-	// 通过工具注册中心获取当前上下文可用的常规工具定义
-	registeredTools := ch.toolRegistry.GetEnabledTools(toolCtx)
-	finalTools = append(finalTools, registeredTools...)
-	tools := finalTools
-	if ch.tmdbMap[chatID] != nil {
-		log.Printf("[AI] 启用 TMDB search_tmdb 工具...")
-	}
-	if group.AIImageEnabled && group.AIImageModel != "" {
-		log.Printf("[AI] 启用图片生成 generate_image 工具...")
-	}
-	if ch.embyMap[chatID] != nil {
-		if isSensitiveAllowed {
-			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats, user_info)...")
-		} else {
-			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats[脱敏], user_info)")
-		}
+	if ch.cognition == nil {
+		ch.sendReply(msg, "⚠️ cognition 未初始化，无法处理 AI 请求")
+		return
 	}
 
-	// 循环处理 AI 的响应（支持多次连续工具调用）
-	var reply string
-	for i := 0; i < 5; i++ {
-		aiMsg, err := ch.aiClient.ChatCompletion(messages, tools)
-		if err != nil {
-			log.Printf("[AI] 调用 AI 失败: %v", err)
-			ch.sendReply(msg, "⚠️ AI 暂时无法回复，请稍后再试")
-			return
-		}
-
-		messages = append(messages, *aiMsg)
-
-		if len(aiMsg.ToolCalls) > 0 {
-			for _, tc := range aiMsg.ToolCalls {
-				toolResult := ch.toolRegistry.Execute(tc.Function.Name, tc.Function.Arguments, toolCtx)
-				messages = append(messages, ChatMessage{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Name:       tc.Function.Name,
-					Content:    MessageContent{Text: toolResult},
-				})
-			}
-			continue
-		}
-
-		reply = aiMsg.Content.Text
-		break
+	envelope := &MessageEnvelope{
+		ChatID:           chatID,
+		SenderID:         senderID,
+		MessageID:        msg.MessageID,
+		ReplyToMessageID: 0,
+		DisplayName:      userName,
+		VerifiedRole:     verifiedRole,
+		IsPrivate:        !isGroupChat,
+		AllowSensitive:   isSensitiveAllowed,
+		UserName:         userName,
+	}
+	if msg.ReplyToMessage != nil {
+		envelope.ReplyToMessageID = msg.ReplyToMessage.MessageID
+	}
+	if verifiedRole != "" {
+		envelope.DisplayName = verifiedRole
 	}
 
+	ch.emitCognitionEvent("message.received", chatID, senderID, envelope.DisplayName, msg.MessageID, userText, map[string]any{
+		"is_private":       envelope.IsPrivate,
+		"allow_sensitive":  envelope.AllowSensitive,
+		"verified_role":    verifiedRole,
+		"display_role_raw": displayRole,
+	})
+
+	resp, err := ch.cognition.Respond(ch.buildRespondRequest(envelope, userText))
+	if err != nil {
+		log.Printf("[AI] cognition/respond 失败: %v", err)
+		ch.sendReply(msg, "⚠️ AI 暂时无法回复，请稍后再试")
+		return
+	}
+
+	reply := strings.TrimSpace(resp.ReplyText)
 	if reply == "" {
 		reply = "（思考了很久，不知道该说什么）"
 	}
 
-	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
-	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
-	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ✅已验证身份]", "")
-	reply = strings.ReplaceAll(reply, "⚠️未知平民", "")
-	reply = strings.ReplaceAll(reply, "✅已验证身份", "")
-	if idx := strings.Index(reply, "[INTERNAL_AUTH_TAG:"); idx != -1 {
-		if endIdx := strings.Index(reply[idx:], "]"); endIdx != -1 {
-			reply = reply[:idx] + reply[idx+endIdx+1:]
-		}
-	}
-
-	reply = strings.TrimSpace(reply)
-	// === 脱敏结束 ===
-
 	// 保存上下文（用户消息 + AI 回复）
-	// 多模态消息降级为纯文本描述，避免历史上下文中包含 Base64 编码数据
-	contextUserText := userText
-	if media != nil {
-		if media.IsVideo {
-			contextUserText = "[用户发送了一个视频] " + userText
-		} else {
-			contextUserText = "[用户发送了一张图片] " + userText
-		}
-	}
 	ch.ctxManager.AddMessage(chatID, ChatMessage{
 		Role:    "user",
-		Content: MessageContent{Text: fmt.Sprintf("%s: %s", displayRole, contextUserText)},
+		Content: MessageContent{Text: fmt.Sprintf("%s: %s", displayRole, userText)},
 	})
 	ch.ctxManager.AddMessage(chatID, ChatMessage{
 		Role:    "assistant",
@@ -1023,9 +978,8 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 
 	// ====== [方案三：长期记忆异步归档] ======
 	if ch.memoryStore != nil {
-		go func(cid int64, cUserText, cReply string) {
-			// 将这一轮完整的用户问题与 AI 回答应答拼合为一条完整的语义记忆
-			memText := fmt.Sprintf("用户说: %s\nAI回答: %s", cUserText, cReply)
+		go func(cid int64, userTextRaw, replyText string) {
+			memText := fmt.Sprintf("用户说: %s\nAI回答: %s", userTextRaw, replyText)
 			metadata := map[string]any{
 				"timestamp": time.Now().Format(time.RFC3339),
 				"user_name": userName,
@@ -1033,126 +987,14 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			if err := ch.memoryStore.Store(cid, memText, metadata); err != nil {
 				log.Printf("[记忆] 长期记忆写入 Qdrant 失败: %v", err)
 			}
-		}(chatID, contextUserText, reply)
+		}(chatID, userText, reply)
 	}
 
-	// 发送回复：检测 AI 回复中是否包含求片确认标记
-	requestConfirmRe := regexp.MustCompile(`\[REQUEST_CONFIRM:(.+?)\]`)
-	if matches := requestConfirmRe.FindStringSubmatch(reply); len(matches) == 2 {
-		movieName := strings.TrimSpace(matches[1])
-		// 从回复中移除标记
-		reply = strings.TrimSpace(requestConfirmRe.ReplaceAllString(reply, ""))
-
-		// 构建确认求片的 Inline Keyboard 按钮
-		// 回调数据格式：reqai:{chatID}:{userID}:{movieName}
-		// movieName 可能较长，Telegram 回调数据限制 64 字节，需要截断
-		callbackMovieName := movieName
-		if len(callbackMovieName) > 30 {
-			callbackMovieName = string([]rune(callbackMovieName)[:30])
-		}
-		cbData := fmt.Sprintf("%s:%d:%d:%s", aiConfirmCallbackPrefix, chatID, senderID, callbackMovieName)
-		keyboard := tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("🎬 确认求片", cbData),
-			),
-		)
-
-		replyMsg := tgbotapi.NewMessage(chatID, reply)
-		replyMsg.ReplyToMessageID = msg.MessageID
-		replyMsg.ParseMode = "Markdown"
-		replyMsg.ReplyMarkup = keyboard
-		if _, err := ch.bot.Send(replyMsg); err != nil {
-			log.Printf("[AI] 发送求片确认消息失败: %v，降级为纯文本", err)
-			// Markdown 解析失败时降级为纯文本
-			replyMsg.ParseMode = ""
-			ch.bot.Send(replyMsg)
-		}
-	} else {
-		ch.sendReply(msg, reply)
-	}
-}
-
-// buildMessages 构建发送给 AI 的完整消息列表。
-// media 参数用于传递多模态内容（图片/视频），为 nil 时保持纯文本模式。
-func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userText string, embyBossData string, media *MediaContent) []ChatMessage {
-	// 根据 chatID 获取群组配置，未匹配时回退到第一个群组
-	group := ch.appConfig.GetGroupConfig(chatID)
-	if group == nil {
-		group = ch.appConfig.Groups[0]
-	}
-
-	var messages []ChatMessage
-
-	// 1. 使用 Middleware 链构建系统提示词
-	basePrompt := group.AISystemPrompt
-	if basePrompt == "" {
-		basePrompt = "你是一个群聊助手，请保持回复简洁友好。"
-	}
-
-	promptCtx := &PromptContext{
-		ChatID:       chatID,
-		UserText:     userText,
-		SenderID:     0,
-		Group:        group,
-		IsPrivate:    false,
-		VerifiedRole: verifiedRole,
-		GlobalKB:     ch.globalKB,
-		GroupKB:      ch.kbMap[chatID],
-		MemoryStore:  ch.memoryStore,
-		EmbyClient:   ch.embyMap[chatID],
-		AppConfig:    ch.appConfig,
-		SkillsLoader: ch.skillsLoader,
-		JobsLoader:   ch.jobsLoader,
-	}
-	systemPrompt := ch.middlewareChain.BuildSystemPrompt(basePrompt, promptCtx)
-
-	messages = append(messages, ChatMessage{
-		Role:    "system",
-		Content: MessageContent{Text: systemPrompt},
+	ch.sendReply(msg, reply)
+	ch.emitCognitionEvent("message.sent", chatID, senderID, envelope.DisplayName, 0, reply, map[string]any{
+		"episode_id": resp.EpisodeID,
+		"tool_calls": len(resp.ToolTranscript),
 	})
-
-	// 2. 历史上下文
-	history := ch.ctxManager.GetMessages(chatID)
-	if history != nil {
-		messages = append(messages, history...)
-	}
-
-	// 3. 当前用户消息，并在末尾追加最终的防伪标签
-	var finalUserText string
-
-	// 按需组装个人资产状态
-	extraPrivateData := ""
-	if embyBossData != "" {
-		extraPrivateData = "\n\n" + embyBossData
-	}
-
-	if verifiedRole != "" {
-		finalUserText = fmt.Sprintf("%s: %s%s\n\n[INTERNAL_AUTH_TAG: ✅已验证身份]", userName, userText, extraPrivateData)
-	} else {
-		finalUserText = fmt.Sprintf("%s: %s%s\n\n[INTERNAL_AUTH_TAG: ⚠️未知平民]", userName, userText, extraPrivateData)
-	}
-
-	// 根据是否有媒体内容决定消息格式：
-	// 有媒体时使用 OpenAI Vision 格式的 content 数组，否则保持纯文本
-	if media != nil {
-		dataURL := fmt.Sprintf("data:%s;base64,%s", media.MIMEType, media.Base64Data)
-		messages = append(messages, ChatMessage{
-			Role: "user",
-			Content: MessageContent{
-				Parts: []ContentPart{
-					{Type: "text", Text: finalUserText},
-					{Type: "image_url", ImageURL: &ImageURL{URL: dataURL}},
-				},
-			},
-		})
-	} else {
-		messages = append(messages, ChatMessage{
-			Role:    "user",
-			Content: MessageContent{Text: finalUserText},
-		})
-	}
-
-	return messages
 }
 
 // cleanMention 从消息文本中移除 @botname

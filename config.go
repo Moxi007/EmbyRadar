@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 // AppConfig 应用顶层配置，包含全局配置和群组配置列表
@@ -28,15 +29,24 @@ type GlobalConfig struct {
 	DBPath           string  `json:"db_path"`      // SQLite 数据库路径，默认 config/embyradar.db
 	TMDBAPIKey       string  `json:"tmdb_api_key"` // TMDB API 密钥，为空时禁用 TMDB 相关功能
 	WebhookPort      int     `json:"webhook_port"` // 全局 Webhook 端口
-	
+
 	// AI 记忆系统配置
-	DigestEnabled    bool    `json:"digest_enabled"`    // 是否开启每日对话摘要（方案四）
-	DigestHour       int     `json:"digest_hour"`       // 每日执行摘要的小时（0-23），默认 3 (凌晨3点)
-	QdrantURL        string  `json:"qdrant_url"`        // Qdrant 数据库 HTTP 地址，为空则禁用向量记忆
-	EmbeddingAPIURL  string  `json:"embedding_api_url"` // 独立的 Embedding API 地址 (例如硅基流动)
-	EmbeddingAPIKey  string  `json:"embedding_api_key"` // Embedding API 密钥
-	EmbeddingModel   string  `json:"embedding_model"`   // Embedding 模型名称
-	MemoryTopK       int     `json:"memory_top_k"`      // 检索的记忆条数，默认 5
+	DigestEnabled            bool   `json:"digest_enabled"`    // 是否开启每日对话摘要（方案四）
+	DigestHour               int    `json:"digest_hour"`       // 每日执行摘要的小时（0-23），默认 3 (凌晨3点)
+	QdrantURL                string `json:"qdrant_url"`        // Qdrant 数据库 HTTP 地址，为空则禁用向量记忆
+	EmbeddingAPIURL          string `json:"embedding_api_url"` // 独立的 Embedding API 地址 (例如硅基流动)
+	EmbeddingAPIKey          string `json:"embedding_api_key"` // Embedding API 密钥
+	EmbeddingModel           string `json:"embedding_model"`   // Embedding 模型名称
+	MemoryTopK               int    `json:"memory_top_k"`      // 检索的记忆条数，默认 5
+	CognitionEnabled         bool   `json:"cognition_enabled"`
+	CognitionBaseURL         string `json:"cognition_base_url"`
+	CognitionDBPath          string `json:"cognition_db_path"`
+	AutonomyEnabled          bool   `json:"autonomy_enabled"`
+	AutonomyTickSecs         int    `json:"autonomy_tick_seconds"`
+	QuietHours               []int  `json:"quiet_hours"`
+	ProactiveCooldownMinutes int    `json:"proactive_cooldown_minutes"`
+	PersonaSeed              string `json:"persona_seed"`
+	RelationshipDecayDays    int    `json:"relationship_decay_days"`
 }
 
 // GroupConfig 群组级独立配置，每个 Telegram 群组一份
@@ -81,25 +91,34 @@ func (ac *AppConfig) GetGroupConfig(chatID int64) *GroupConfig {
 func (ac *AppConfig) SaveConfig(filename string) error {
 	// 构建与配置文件一致的顶层结构
 	raw := map[string]interface{}{
-		"telegram_bot_token": ac.Global.TelegramBotToken,
-		"ai_base_url":        ac.Global.AIBaseURL,
-		"ai_api_key":         ac.Global.AIAPIKey,
-		"ai_model":           ac.Global.AIModel,
-		"ai_max_tokens":      ac.Global.AIMaxTokens,
-		"ai_temperature":     ac.Global.AITemperature,
-		"ai_max_context":     ac.Global.AIMaxContext,
-		"bot_admins":         ac.Global.BotAdmins,
-		"db_path":            ac.Global.DBPath,
-		"tmdb_api_key":       ac.Global.TMDBAPIKey,
-		"webhook_port":       ac.Global.WebhookPort,
-		"digest_enabled":     ac.Global.DigestEnabled,
-		"digest_hour":        ac.Global.DigestHour,
-		"qdrant_url":         ac.Global.QdrantURL,
-		"embedding_api_url":  ac.Global.EmbeddingAPIURL,
-		"embedding_api_key":  ac.Global.EmbeddingAPIKey,
-		"embedding_model":    ac.Global.EmbeddingModel,
-		"memory_top_k":       ac.Global.MemoryTopK,
-		"groups":             ac.Groups,
+		"telegram_bot_token":         ac.Global.TelegramBotToken,
+		"ai_base_url":                ac.Global.AIBaseURL,
+		"ai_api_key":                 ac.Global.AIAPIKey,
+		"ai_model":                   ac.Global.AIModel,
+		"ai_max_tokens":              ac.Global.AIMaxTokens,
+		"ai_temperature":             ac.Global.AITemperature,
+		"ai_max_context":             ac.Global.AIMaxContext,
+		"bot_admins":                 ac.Global.BotAdmins,
+		"db_path":                    ac.Global.DBPath,
+		"tmdb_api_key":               ac.Global.TMDBAPIKey,
+		"webhook_port":               ac.Global.WebhookPort,
+		"digest_enabled":             ac.Global.DigestEnabled,
+		"digest_hour":                ac.Global.DigestHour,
+		"qdrant_url":                 ac.Global.QdrantURL,
+		"embedding_api_url":          ac.Global.EmbeddingAPIURL,
+		"embedding_api_key":          ac.Global.EmbeddingAPIKey,
+		"embedding_model":            ac.Global.EmbeddingModel,
+		"memory_top_k":               ac.Global.MemoryTopK,
+		"cognition_enabled":          ac.Global.CognitionEnabled,
+		"cognition_base_url":         ac.Global.CognitionBaseURL,
+		"cognition_db_path":          ac.Global.CognitionDBPath,
+		"autonomy_enabled":           ac.Global.AutonomyEnabled,
+		"autonomy_tick_seconds":      ac.Global.AutonomyTickSecs,
+		"quiet_hours":                ac.Global.QuietHours,
+		"proactive_cooldown_minutes": ac.Global.ProactiveCooldownMinutes,
+		"persona_seed":               ac.Global.PersonaSeed,
+		"relationship_decay_days":    ac.Global.RelationshipDecayDays,
+		"groups":                     ac.Groups,
 	}
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
@@ -121,25 +140,34 @@ func (ac *AppConfig) IsAuthorizedGroup(chatID int64) bool {
 func LoadConfig(filename string) (*AppConfig, error) {
 	// 中间结构体，用于解析顶层全局字段和 groups 原始 JSON
 	type rawConfig struct {
-		TelegramBotToken string          `json:"telegram_bot_token"`
-		AIBaseURL        string          `json:"ai_base_url"`
-		AIAPIKey         string          `json:"ai_api_key"`
-		AIModel          string          `json:"ai_model"`
-		AIMaxTokens      int             `json:"ai_max_tokens"`
-		AITemperature    float64         `json:"ai_temperature"`
-		AIMaxContext     int             `json:"ai_max_context"`
-		BotAdmins        []int64         `json:"bot_admins"`
-		DBPath           string          `json:"db_path"`
-		TMDBAPIKey       string          `json:"tmdb_api_key"`
-		WebhookPort      int             `json:"webhook_port"`
-		DigestEnabled    bool            `json:"digest_enabled"`
-		DigestHour       int             `json:"digest_hour"`
-		QdrantURL        string          `json:"qdrant_url"`
-		EmbeddingAPIURL  string          `json:"embedding_api_url"`
-		EmbeddingAPIKey  string          `json:"embedding_api_key"`
-		EmbeddingModel   string          `json:"embedding_model"`
-		MemoryTopK       int             `json:"memory_top_k"`
-		Groups           json.RawMessage `json:"groups"`
+		TelegramBotToken         string          `json:"telegram_bot_token"`
+		AIBaseURL                string          `json:"ai_base_url"`
+		AIAPIKey                 string          `json:"ai_api_key"`
+		AIModel                  string          `json:"ai_model"`
+		AIMaxTokens              int             `json:"ai_max_tokens"`
+		AITemperature            float64         `json:"ai_temperature"`
+		AIMaxContext             int             `json:"ai_max_context"`
+		BotAdmins                []int64         `json:"bot_admins"`
+		DBPath                   string          `json:"db_path"`
+		TMDBAPIKey               string          `json:"tmdb_api_key"`
+		WebhookPort              int             `json:"webhook_port"`
+		DigestEnabled            bool            `json:"digest_enabled"`
+		DigestHour               int             `json:"digest_hour"`
+		QdrantURL                string          `json:"qdrant_url"`
+		EmbeddingAPIURL          string          `json:"embedding_api_url"`
+		EmbeddingAPIKey          string          `json:"embedding_api_key"`
+		EmbeddingModel           string          `json:"embedding_model"`
+		MemoryTopK               int             `json:"memory_top_k"`
+		CognitionEnabled         bool            `json:"cognition_enabled"`
+		CognitionBaseURL         string          `json:"cognition_base_url"`
+		CognitionDBPath          string          `json:"cognition_db_path"`
+		AutonomyEnabled          bool            `json:"autonomy_enabled"`
+		AutonomyTickSecs         int             `json:"autonomy_tick_seconds"`
+		QuietHours               []int           `json:"quiet_hours"`
+		ProactiveCooldownMinutes int             `json:"proactive_cooldown_minutes"`
+		PersonaSeed              string          `json:"persona_seed"`
+		RelationshipDecayDays    int             `json:"relationship_decay_days"`
+		Groups                   json.RawMessage `json:"groups"`
 	}
 
 	data, err := os.ReadFile(filename)
@@ -147,22 +175,31 @@ func LoadConfig(filename string) (*AppConfig, error) {
 		if os.IsNotExist(err) {
 			// 生成新格式的默认模板，包含 groups 数组示例
 			defaultTemplate := map[string]interface{}{
-				"telegram_bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
-				"ai_base_url":        "https://api.openai.com/v1",
-				"ai_api_key":         "YOUR_AI_API_KEY_HERE",
-				"ai_model":           "gpt-4o",
-				"ai_max_tokens":      1000,
-				"ai_temperature":     0.7,
-				"ai_max_context":     20,
-				"bot_admins":         []int64{},
-				"webhook_port":       8080,
-				"digest_enabled":     true,
-				"digest_hour":        3,
-				"qdrant_url":         "",
-				"embedding_api_url":  "",
-				"embedding_api_key":  "",
-				"embedding_model":    "",
-				"memory_top_k":       5,
+				"telegram_bot_token":         "YOUR_TELEGRAM_BOT_TOKEN_HERE",
+				"ai_base_url":                "https://api.openai.com/v1",
+				"ai_api_key":                 "YOUR_AI_API_KEY_HERE",
+				"ai_model":                   "gpt-4o",
+				"ai_max_tokens":              1000,
+				"ai_temperature":             0.7,
+				"ai_max_context":             20,
+				"bot_admins":                 []int64{},
+				"webhook_port":               8080,
+				"digest_enabled":             true,
+				"digest_hour":                3,
+				"qdrant_url":                 "",
+				"embedding_api_url":          "",
+				"embedding_api_key":          "",
+				"embedding_model":            "",
+				"memory_top_k":               5,
+				"cognition_enabled":          true,
+				"cognition_base_url":         "http://127.0.0.1:3400",
+				"cognition_db_path":          "config/cognition.db",
+				"autonomy_enabled":           true,
+				"autonomy_tick_seconds":      300,
+				"quiet_hours":                []int{0, 1, 2, 3, 4, 5, 6},
+				"proactive_cooldown_minutes": 720,
+				"persona_seed":               "谨慎、机灵、记仇、会长期记住用户关系变化。",
+				"relationship_decay_days":    14,
 				"groups": []map[string]interface{}{
 					{
 						"telegram_chat_id":    -1000000000000,
@@ -263,6 +300,18 @@ func LoadConfig(filename string) (*AppConfig, error) {
 	if raw.MemoryTopK <= 0 {
 		raw.MemoryTopK = 5
 	}
+	if raw.AutonomyTickSecs <= 0 {
+		raw.AutonomyTickSecs = 300
+	}
+	if raw.ProactiveCooldownMinutes <= 0 {
+		raw.ProactiveCooldownMinutes = 720
+	}
+	if raw.RelationshipDecayDays <= 0 {
+		raw.RelationshipDecayDays = 14
+	}
+	if len(raw.QuietHours) == 0 {
+		raw.QuietHours = []int{0, 1, 2, 3, 4, 5, 6}
+	}
 	// 如果配置了 DigestHour 但超出了 0-23 的范围，则重置为凌晨 3 点
 	if raw.DigestHour < 0 || raw.DigestHour > 23 {
 		raw.DigestHour = 3
@@ -271,24 +320,33 @@ func LoadConfig(filename string) (*AppConfig, error) {
 	// 构建 AppConfig
 	appConfig := &AppConfig{
 		Global: GlobalConfig{
-			TelegramBotToken: raw.TelegramBotToken,
-			AIBaseURL:        raw.AIBaseURL,
-			AIAPIKey:         raw.AIAPIKey,
-			AIModel:          raw.AIModel,
-			AIMaxTokens:      raw.AIMaxTokens,
-			AITemperature:    raw.AITemperature,
-			AIMaxContext:     raw.AIMaxContext,
-			BotAdmins:        raw.BotAdmins,
-			DBPath:           raw.DBPath,
-			TMDBAPIKey:       raw.TMDBAPIKey,
-			WebhookPort:      raw.WebhookPort,
-			DigestEnabled:    raw.DigestEnabled,
-			DigestHour:       raw.DigestHour,
-			QdrantURL:        raw.QdrantURL,
-			EmbeddingAPIURL:  raw.EmbeddingAPIURL,
-			EmbeddingAPIKey:  raw.EmbeddingAPIKey,
-			EmbeddingModel:   raw.EmbeddingModel,
-			MemoryTopK:       raw.MemoryTopK,
+			TelegramBotToken:         raw.TelegramBotToken,
+			AIBaseURL:                raw.AIBaseURL,
+			AIAPIKey:                 raw.AIAPIKey,
+			AIModel:                  raw.AIModel,
+			AIMaxTokens:              raw.AIMaxTokens,
+			AITemperature:            raw.AITemperature,
+			AIMaxContext:             raw.AIMaxContext,
+			BotAdmins:                raw.BotAdmins,
+			DBPath:                   raw.DBPath,
+			TMDBAPIKey:               raw.TMDBAPIKey,
+			WebhookPort:              raw.WebhookPort,
+			DigestEnabled:            raw.DigestEnabled,
+			DigestHour:               raw.DigestHour,
+			QdrantURL:                raw.QdrantURL,
+			EmbeddingAPIURL:          raw.EmbeddingAPIURL,
+			EmbeddingAPIKey:          raw.EmbeddingAPIKey,
+			EmbeddingModel:           raw.EmbeddingModel,
+			MemoryTopK:               raw.MemoryTopK,
+			CognitionEnabled:         raw.CognitionEnabled,
+			CognitionBaseURL:         raw.CognitionBaseURL,
+			CognitionDBPath:          raw.CognitionDBPath,
+			AutonomyEnabled:          raw.AutonomyEnabled,
+			AutonomyTickSecs:         raw.AutonomyTickSecs,
+			QuietHours:               raw.QuietHours,
+			ProactiveCooldownMinutes: raw.ProactiveCooldownMinutes,
+			PersonaSeed:              raw.PersonaSeed,
+			RelationshipDecayDays:    raw.RelationshipDecayDays,
 		},
 		Groups: groups,
 	}
@@ -297,6 +355,22 @@ func LoadConfig(filename string) (*AppConfig, error) {
 	appConfig.groupMap = make(map[int64]*GroupConfig, len(groups))
 	for _, g := range groups {
 		appConfig.groupMap[g.TelegramChatID] = g
+	}
+
+	hasAIEnabled := false
+	for _, group := range groups {
+		if group.AIEnabled {
+			hasAIEnabled = true
+			break
+		}
+	}
+	if hasAIEnabled {
+		if !appConfig.Global.CognitionEnabled {
+			return nil, fmt.Errorf("检测到已启用 AI 的群组，但 cognition_enabled=false；新架构要求 cognition 必须启用")
+		}
+		if strings.TrimSpace(appConfig.Global.CognitionBaseURL) == "" {
+			return nil, fmt.Errorf("检测到已启用 AI 的群组，但未配置 cognition_base_url")
+		}
 	}
 
 	return appConfig, nil

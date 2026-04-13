@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
@@ -531,44 +530,10 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 	// ========== 无链接匹配：走原有的 AI 意图分析流程 ==========
 	{
 		// 调用 AI 分析用户输入，提取影视名称、类型、年份、洗版意图、季数
-		intentMessages := []ChatMessage{
-			{
-				Role: "system",
-				Content: MessageContent{Text: "你是一个影视信息提取助手。请从用户的文本中提取以下信息并以 JSON 格式返回：\n" +
-					"1. name: 影视作品名称\n" +
-					"2. type: 类型，\"movie\"（电影）或 \"tv\"（电视剧），无法判断时留空\n" +
-					"3. year: 年份，无法判断时留空\n" +
-					"4. is_remaster: 是否有洗版意图（用户想要更高清版本），布尔值\n" +
-					"5. season: 季数，整数，无法判断时为 0。如果用户输入中包含季数信息（如\"第X季\"、\"X季\"、\"Season X\"等），请将季数从 name 中分离出来\n\n" +
-					"只返回 JSON，不要包含其他文字。示例：{\"name\":\"流浪地球2\",\"type\":\"movie\",\"year\":\"2023\",\"is_remaster\":false,\"season\":0}"},
-			},
-			{
-				Role:    "user",
-				Content: MessageContent{Text: text},
-			},
-		}
-
-		aiResp, err := ch.aiClient.ChatCompletion(intentMessages, nil)
+		intent, err := ch.cognition.ParseRequestIntent(ch.llmConfig(), text)
 		if err != nil {
 			log.Printf("[求片] AI 意图分析失败: %v", err)
 			reply := tgbotapi.NewMessage(chatID, "⚠️ AI 暂时无法处理你的请求，请稍后再试")
-			reply.ReplyToMessageID = msg.MessageID
-			ch.bot.Send(reply)
-			return
-		}
-
-		// 解析 AI 返回的 JSON，提取关键信息
-		var intent aiIntentResult
-		respText := strings.TrimSpace(aiResp.Content.Text)
-		// 处理 AI 可能返回的 markdown 代码块包裹
-		respText = strings.TrimPrefix(respText, "```json")
-		respText = strings.TrimPrefix(respText, "```")
-		respText = strings.TrimSuffix(respText, "```")
-		respText = strings.TrimSpace(respText)
-
-		if err := json.Unmarshal([]byte(respText), &intent); err != nil {
-			log.Printf("[求片] 解析 AI 意图结果失败: %v, 原始响应: %s", err, aiResp.Content.Text)
-			reply := tgbotapi.NewMessage(chatID, "无法识别你想要的影视作品，请提供更具体的片名或描述")
 			reply.ReplyToMessageID = msg.MessageID
 			ch.bot.Send(reply)
 			return
@@ -871,6 +836,12 @@ func (rh *RequestHandler) HandleSelectCallback(ch *ChatHandler, query *tgbotapi.
 			rh.deleteSession(cbData.ChatID, cbData.UserID)
 			return
 		}
+		ch.emitCognitionEvent("request.created", cbData.ChatID, cbData.UserID, session.UserName, session.MessageID, selected.GetDisplayTitle(), map[string]any{
+			"status":     "open",
+			"title":      selected.GetDisplayTitle(),
+			"tmdb_id":    selected.ID,
+			"media_type": selected.MediaType,
+		})
 	}
 
 	// 获取群组名称和群组级管理员配置，用于通知路由
@@ -1003,45 +974,20 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 	}
 
 	// 调用 AI 分析影视名称和类型
-	intentMessages := []ChatMessage{
-		{
-			Role: "system",
-			Content: MessageContent{Text: "你是一个影视信息提取助手。请从用户的文本中提取以下信息并以 JSON 格式返回：\n" +
-				"1. name: 影视作品名称\n" +
-				"2. type: 类型，\"movie\"（电影）或 \"tv\"（电视剧），无法判断时留空\n" +
-				"3. is_remaster: 是否有洗版意图（用户想要更高清版本），布尔值\n" +
-				"4. season: 季数，整数，无法判断时为 0。如果用户输入中包含季数信息（如\"第X季\"、\"X季\"、\"Season X\"等），请将季数从 name 中分离出来\n\n" +
-				"只返回 JSON，不要包含其他文字。示例：{\"name\":\"流浪地球2\",\"type\":\"movie\",\"is_remaster\":false,\"season\":0}"},
-		},
-		{
-			Role:    "user",
-			Content: MessageContent{Text: movieName},
-		},
-	}
-
 	var mediaType string
 	var isRemaster bool
 	var season int
 
-	aiResp, err := ch.aiClient.ChatCompletion(intentMessages, nil)
+	intent, err := ch.cognition.ParseRequestIntent(ch.llmConfig(), movieName)
 	if err != nil {
 		log.Printf("[求片] AI 意图分析失败: %v，使用原始片名搜索", err)
 	} else {
-		respText := strings.TrimSpace(aiResp.Content.Text)
-		respText = strings.TrimPrefix(respText, "```json")
-		respText = strings.TrimPrefix(respText, "```")
-		respText = strings.TrimSuffix(respText, "```")
-		respText = strings.TrimSpace(respText)
-
-		var intent aiIntentResult
-		if err := json.Unmarshal([]byte(respText), &intent); err == nil {
-			if intent.Name != "" {
-				movieName = intent.Name
-			}
-			mediaType = intent.Type
-			isRemaster = intent.IsRemaster
-			season = intent.Season
+		if intent.Name != "" {
+			movieName = intent.Name
 		}
+		mediaType = intent.Type
+		isRemaster = intent.IsRemaster
+		season = intent.Season
 	}
 
 	// 正则兜底：从名称中剥离季数信息，确保纯剧名传给 TMDB 搜索
@@ -1195,6 +1141,13 @@ func (rh *RequestHandler) HandleCallbackQuery(ch *ChatHandler, query *tgbotapi.C
 		}
 		if err := rh.store.UpdateStatus(dbRecord.ID, dbStatus); err != nil {
 			log.Printf("[求片] 更新数据库状态失败: %v", err)
+		} else {
+			ch.emitCognitionEvent("request.status_changed", cbData.ChatID, cbData.UserID, "", dbRecord.MessageID, dbRecord.Title, map[string]any{
+				"status":     dbStatus,
+				"title":      dbRecord.Title,
+				"tmdb_id":    dbRecord.TMDBID,
+				"media_type": dbRecord.MediaType,
+			})
 		}
 	}
 
@@ -1486,14 +1439,14 @@ func (rh *RequestHandler) HandleLibraryNewNotify(ch *ChatHandler, targetChatID i
 
 	for _, rec := range records {
 		log.Printf("[求片] 影片入库，匹配到求片记录: user=%d, tmdb=%d, title=%s", rec.UserID, tmdbID, rec.Title)
-		
+
 		tmdbLink := fmt.Sprintf("https://www.themoviedb.org/%s/%d", rec.MediaType, tmdbID)
 		userMention := fmt.Sprintf("[%s](tg://user?id=%d)", cleanMarkdownName(rec.UserName), rec.UserID)
 		msgText := fmt.Sprintf("🎉 叮当！%s，你求片的 [%s](%s) 已经入库啦，快去看看吧！", userMention, cleanMarkdownName(rec.Title), tmdbLink)
-		
+
 		reply := tgbotapi.NewMessage(rec.ChatID, msgText)
 		reply.ParseMode = "Markdown"
-		
+
 		// 引用用户最初始的求片消息
 		if rec.MessageID > 0 {
 			reply.ReplyToMessageID = rec.MessageID
@@ -1514,6 +1467,13 @@ func (rh *RequestHandler) HandleLibraryNewNotify(ch *ChatHandler, targetChatID i
 		// 更新记录状态为 fulfilled
 		if err := rh.store.UpdateStatus(rec.ID, "fulfilled"); err != nil {
 			log.Printf("[求片] 更新记录状态为 fulfilled 失败 (ID: %d): %v", rec.ID, err)
+		} else {
+			ch.emitCognitionEvent("request.status_changed", rec.ChatID, rec.UserID, rec.UserName, rec.MessageID, rec.Title, map[string]any{
+				"status":     "fulfilled",
+				"title":      rec.Title,
+				"tmdb_id":    rec.TMDBID,
+				"media_type": rec.MediaType,
+			})
 		}
 	}
 }
