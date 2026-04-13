@@ -1,29 +1,10 @@
 package main
 
-import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"strings"
-	"time"
-)
+// cognition.go — Cognition 数据类型定义。
+// CognitionClient（旧 HTTP 客户端）已删除，所有调用走 CognitionEngine 接口。
+// 本文件仅保留跨模块共享的请求/响应类型。
 
-type CognitionClient struct {
-	baseURL    string
-	httpClient *http.Client
-}
-
-func NewCognitionClient(baseURL string) *CognitionClient {
-	return &CognitionClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
-		},
-	}
-}
-
+// LLMConfig 大语言模型连接配置
 type LLMConfig struct {
 	BaseURL     string  `json:"base_url"`
 	APIKey      string  `json:"api_key"`
@@ -32,11 +13,13 @@ type LLMConfig struct {
 	Temperature float64 `json:"temperature"`
 }
 
+// CognitionMessage 认知上下文中的一条消息
 type CognitionMessage struct {
 	Role string `json:"role"`
 	Text string `json:"text"`
 }
 
+// CognitionEvent 认知事件（记录到事件日志）
 type CognitionEvent struct {
 	Type      string         `json:"type"`
 	ChatID    int64          `json:"chat_id"`
@@ -48,6 +31,7 @@ type CognitionEvent struct {
 	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
+// RespondRequest 对话请求（cognition/respond）
 type RespondRequest struct {
 	LLM                LLMConfig          `json:"llm"`
 	EngineBaseURL      string             `json:"engine_base_url"`
@@ -72,11 +56,13 @@ type RespondRequest struct {
 	KnowledgeSummary   string             `json:"knowledge_summary,omitempty"`
 }
 
+// ToolTrace 工具调用记录
 type ToolTrace struct {
 	Command string `json:"command"`
 	Output  string `json:"output"`
 }
 
+// RespondResponse 对话响应
 type RespondResponse struct {
 	EpisodeID       string         `json:"episode_id"`
 	ReplyText       string         `json:"reply_text"`
@@ -85,11 +71,13 @@ type RespondResponse struct {
 	PersonaSnapshot map[string]any `json:"persona_snapshot,omitempty"`
 }
 
+// RequestIntentRequest 求片意图提取请求
 type RequestIntentRequest struct {
 	LLM  LLMConfig `json:"llm"`
 	Text string    `json:"text"`
 }
 
+// RequestIntentResponse 求片意图提取响应
 type RequestIntentResponse struct {
 	Name       string `json:"name"`
 	Type       string `json:"type"`
@@ -98,16 +86,19 @@ type RequestIntentResponse struct {
 	Season     int    `json:"season"`
 }
 
+// TextTransformRequest 文本转换请求
 type TextTransformRequest struct {
 	LLM        LLMConfig `json:"llm"`
 	SystemHint string    `json:"system_hint"`
 	UserText   string    `json:"user_text"`
 }
 
+// TextTransformResponse 文本转换响应
 type TextTransformResponse struct {
 	Text string `json:"text"`
 }
 
+// PlannedAction 计划任务
 type PlannedAction struct {
 	ID      string             `json:"id"`
 	Kind    string             `json:"kind"`
@@ -116,110 +107,9 @@ type PlannedAction struct {
 	Meta    map[string]any     `json:"meta,omitempty"`
 }
 
+// ActionResultRequest 任务执行结果
 type ActionResultRequest struct {
 	Output    string `json:"output"`
 	Success   bool   `json:"success"`
 	ErrorText string `json:"error_text,omitempty"`
-}
-
-func (cc *CognitionClient) HealthCheck() error {
-	req, err := http.NewRequest(http.MethodGet, cc.baseURL+"/health", nil)
-	if err != nil {
-		return err
-	}
-	resp, err := cc.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("请求 cognition health 失败: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("cognition health 非 200: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	return nil
-}
-
-func (cc *CognitionClient) SendEvent(event *CognitionEvent) error {
-	_, err := cc.postJSON("/cognition/events", event, nil)
-	return err
-}
-
-func (cc *CognitionClient) Respond(reqBody *RespondRequest) (*RespondResponse, error) {
-	var resp RespondResponse
-	if _, err := cc.postJSON("/cognition/respond", reqBody, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-func (cc *CognitionClient) ParseRequestIntent(llm LLMConfig, text string) (*RequestIntentResponse, error) {
-	var resp RequestIntentResponse
-	if _, err := cc.postJSON("/cognition/request-intent", &RequestIntentRequest{LLM: llm, Text: text}, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-func (cc *CognitionClient) TransformText(path string, reqBody *TextTransformRequest) (string, error) {
-	var resp TextTransformResponse
-	if _, err := cc.postJSON(path, reqBody, &resp); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(resp.Text), nil
-}
-
-func (cc *CognitionClient) ClaimAction() (*PlannedAction, error) {
-	var resp PlannedAction
-	status, err := cc.postJSON("/cognition/actions/claim", map[string]any{}, &resp)
-	if err != nil {
-		return nil, err
-	}
-	if status == http.StatusNoContent {
-		return nil, nil
-	}
-	if resp.ID == "" {
-		return nil, nil
-	}
-	return &resp, nil
-}
-
-func (cc *CognitionClient) SubmitActionResult(actionID string, result *ActionResultRequest) error {
-	_, err := cc.postJSON("/cognition/actions/"+actionID+"/result", result, nil)
-	return err
-}
-
-func (cc *CognitionClient) postJSON(path string, reqBody any, out any) (int, error) {
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return 0, fmt.Errorf("序列化 cognition 请求失败: %w", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, cc.baseURL+path, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return 0, fmt.Errorf("创建 cognition 请求失败: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := cc.httpClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("调用 cognition 失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNoContent {
-		return resp.StatusCode, nil
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp.StatusCode, fmt.Errorf("读取 cognition 响应失败: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.StatusCode, fmt.Errorf("cognition 返回错误 (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	if out != nil {
-		if err := json.Unmarshal(body, out); err != nil {
-			return resp.StatusCode, fmt.Errorf("解析 cognition 响应失败: %w", err)
-		}
-	}
-	return resp.StatusCode, nil
 }

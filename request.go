@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"regexp"
@@ -530,7 +531,7 @@ func (rh *RequestHandler) HandleRequest(ch *ChatHandler, msg *tgbotapi.Message, 
 	// ========== 无链接匹配：走原有的 AI 意图分析流程 ==========
 	{
 		// 调用 AI 分析用户输入，提取影视名称、类型、年份、洗版意图、季数
-		intent, err := ch.cognition.ParseRequestIntent(ch.llmConfig(), text)
+		intent, err := ch.cognition.ParseRequestIntent(context.Background(), ch.llmConfig(), text)
 		if err != nil {
 			log.Printf("[求片] AI 意图分析失败: %v", err)
 			reply := tgbotapi.NewMessage(chatID, "⚠️ AI 暂时无法处理你的请求，请稍后再试")
@@ -978,7 +979,7 @@ func (rh *RequestHandler) HandleAIConfirmCallback(ch *ChatHandler, query *tgbota
 	var isRemaster bool
 	var season int
 
-	intent, err := ch.cognition.ParseRequestIntent(ch.llmConfig(), movieName)
+	intent, err := ch.cognition.ParseRequestIntent(context.Background(), ch.llmConfig(), movieName)
 	if err != nil {
 		log.Printf("[求片] AI 意图分析失败: %v，使用原始片名搜索", err)
 	} else {

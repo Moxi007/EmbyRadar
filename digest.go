@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -9,7 +10,7 @@ import (
 
 // DigestScheduler 每日对话摘要调度器
 type DigestScheduler struct {
-	cognition   *CognitionClient
+	cognition   CognitionEngine
 	llm         LLMConfig
 	ctxManager  *ContextManager
 	kbMap       map[int64]*KnowledgeBase
@@ -20,7 +21,7 @@ type DigestScheduler struct {
 }
 
 // NewDigestScheduler 创建摘要调度器
-func NewDigestScheduler(cognition *CognitionClient, ctxManager *ContextManager, appConfig *AppConfig, memoryStore *MemoryStore) *DigestScheduler {
+func NewDigestScheduler(cognition CognitionEngine, ctxManager *ContextManager, appConfig *AppConfig, memoryStore *MemoryStore) *DigestScheduler {
 	if cognition == nil {
 		return nil
 	}
@@ -142,7 +143,7 @@ func (ds *DigestScheduler) digestGroup(chatID int64) error {
 
 	log.Printf("[每日摘要] 正在调用 AI 提炼群聊 %d 的知识点，共 %d 条原消息", chatID, len(logs))
 
-	result, err := ds.cognition.TransformText("/cognition/summarize-digest", &TextTransformRequest{
+	result, err := ds.cognition.TransformText(context.Background(), "/cognition/summarize-digest", &TextTransformRequest{
 		LLM:        ds.llm,
 		SystemHint: systemPrompt,
 		UserText:   "今日群聊记录如下：\n\n" + rawText,

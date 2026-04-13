@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -160,8 +161,16 @@ func NewAIClient(global *GlobalConfig) *AIClient {
 	}
 }
 
-// ChatCompletion 调用 Chat Completion API，返回 AI 完整的消息对象
+// ChatCompletion 向后兼容的无 context 版本，内部使用 context.Background()。
+// 新代码应优先使用 ChatCompletionWithContext。
 func (ac *AIClient) ChatCompletion(messages []ChatMessage, tools []Tool) (*ChatMessage, error) {
+	return ac.ChatCompletionWithContext(context.Background(), messages, tools)
+}
+
+// ChatCompletionWithContext 带 context 的 Chat Completion 调用。
+// context 控制整个调用的生命周期（含重试），取代固定 HTTPClient.Timeout。
+// 每次重试前检查 ctx 是否已取消，避免在上层已超时的情况下继续浪费时间。
+func (ac *AIClient) ChatCompletionWithContext(ctx context.Context, messages []ChatMessage, tools []Tool) (*ChatMessage, error) {
 	reqBody := ChatCompletionRequest{
 		Model:       ac.Model,
 		Messages:    messages,
@@ -176,18 +185,30 @@ func (ac *AIClient) ChatCompletion(messages []ChatMessage, tools []Tool) (*ChatM
 	}
 
 	url := fmt.Sprintf("%s/chat/completions", ac.BaseURL)
-	maxRetries := 3
+	maxRetries := 2
 	var lastErr error
 
 	for i := 0; i <= maxRetries; i++ {
-		if i > 0 {
-			// 指数退避重试 (1s, 2s, 4s...)
-			delay := time.Duration(1<<uint(i-1)) * time.Second
-			log.Printf("[AI] API 繁忙(503/429)或网络错误，等待 %v 后进行第 %d 次重试...", delay, i)
-			time.Sleep(delay)
+		// 每次尝试前检查 context 是否已取消
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return nil, fmt.Errorf("context 已取消 (已重试 %d 次, 最终错误: %w)", i, lastErr)
+			}
+			return nil, fmt.Errorf("context 已取消: %w", err)
 		}
 
-		req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+		if i > 0 {
+			// 指数退避重试 (1s, 2s)
+			delay := time.Duration(1<<uint(i-1)) * time.Second
+			log.Printf("[AI] API 繁忙(503/429)或网络错误，等待 %v 后进行第 %d 次重试...", delay, i)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, fmt.Errorf("context 已取消 (等待重试时): %w", ctx.Err())
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
 		if err != nil {
 			return nil, fmt.Errorf("创建 HTTP 请求失败: %w", err)
 		}

@@ -1,18 +1,19 @@
 package main
 
 import (
+	"context"
 	"log"
 	"time"
 )
 
 type ProactiveActionWorker struct {
-	cognition *CognitionClient
+	cognition CognitionEngine
 	engine    *HostEngine
 	interval  time.Duration
 	stopCh    chan struct{}
 }
 
-func NewProactiveActionWorker(cognition *CognitionClient, engine *HostEngine, interval time.Duration) *ProactiveActionWorker {
+func NewProactiveActionWorker(cognition CognitionEngine, engine *HostEngine, interval time.Duration) *ProactiveActionWorker {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
@@ -44,7 +45,7 @@ func (w *ProactiveActionWorker) Stop() {
 }
 
 func (w *ProactiveActionWorker) tick() {
-	action, err := w.cognition.ClaimAction()
+	action, err := w.cognition.ClaimAction(context.Background())
 	if err != nil {
 		log.Printf("[Autonomy] 领取主动动作失败: %v", err)
 		return
@@ -63,7 +64,8 @@ func (w *ProactiveActionWorker) tick() {
 		log.Printf("[Autonomy] 执行动作失败 (%s): %v", action.ID, execErr)
 	}
 
-	if err := w.cognition.SubmitActionResult(action.ID, result); err != nil {
+	if err := w.cognition.SubmitActionResult(context.Background(), action.ID, result); err != nil {
 		log.Printf("[Autonomy] 回写动作结果失败 (%s): %v", action.ID, err)
 	}
 }
+

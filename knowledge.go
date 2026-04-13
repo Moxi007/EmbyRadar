@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -151,7 +152,7 @@ func (kb *KnowledgeBase) AddEntry(name, content string) error {
 // 若文件已存在，将新内容与旧内容通过 AI 进行语义合并和去重
 // 若文件不存在，创建新文件
 // 返回 (isNew bool, err error)
-func (kb *KnowledgeBase) MergeEntry(name, newContent string, cognition *CognitionClient, llm LLMConfig) (bool, error) {
+func (kb *KnowledgeBase) MergeEntry(name, newContent string, cognition CognitionEngine, llm LLMConfig) (bool, error) {
 	// 防御性检查，防止路径穿越
 	name = filepath.Base(name)
 	if name == "" || name == "." || name == "/" {
@@ -196,7 +197,7 @@ func (kb *KnowledgeBase) MergeEntry(name, newContent string, cognition *Cognitio
 }
 
 // mergeWithAI 使用 AI 对新旧内容进行语义合并和去重
-func mergeWithAI(cognition *CognitionClient, llm LLMConfig, oldContent, newContent string) (string, error) {
+func mergeWithAI(cognition CognitionEngine, llm LLMConfig, oldContent, newContent string) (string, error) {
 	if cognition == nil {
 		return "", fmt.Errorf("cognition 客户端未初始化")
 	}
@@ -208,7 +209,7 @@ func mergeWithAI(cognition *CognitionClient, llm LLMConfig, oldContent, newConte
 		"4. 直接输出合并后的完整内容，不要包含任何前言或解释\n\n"+
 		"【已有内容】：\n%s\n\n【新增内容】：\n%s", oldContent, newContent)
 
-	result, err := cognition.TransformText("/cognition/merge-knowledge", &TextTransformRequest{
+	result, err := cognition.TransformText(context.Background(), "/cognition/merge-knowledge", &TextTransformRequest{
 		LLM:        llm,
 		SystemHint: "你是一个专业的知识库合并引擎，负责将新旧内容智能合并。",
 		UserText:   prompt,

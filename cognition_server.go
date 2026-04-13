@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -203,7 +204,7 @@ func NewCognitionServer(global *GlobalConfig) (*CognitionServer, error) {
 		quietHours:               append([]int(nil), global.QuietHours...),
 		relationshipDecayDays:    global.RelationshipDecayDays,
 		db:                       db,
-		httpClient:               &http.Client{Timeout: 60 * time.Second},
+		httpClient:               &http.Client{Timeout: 30 * time.Second}, // engine/run 是本地调用，30s 足矣
 	}
 	if server.proactiveCooldownMinutes <= 0 {
 		server.proactiveCooldownMinutes = 720
@@ -280,6 +281,10 @@ func (cs *CognitionServer) handleEvents(w http.ResponseWriter, r *http.Request) 
 }
 
 func (cs *CognitionServer) handleRespondHTTP(w http.ResponseWriter, r *http.Request) {
+	// HTTP 适配层：注入 150s 超时，确保服务端比客户端先完成
+	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
+	defer cancel()
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -289,7 +294,7 @@ func (cs *CognitionServer) handleRespondHTTP(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	resp, err := cs.handleRespond(&req)
+	resp, err := cs.Respond(ctx, &req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -307,7 +312,7 @@ func (cs *CognitionServer) handleRequestIntent(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	raw, err := cs.completeText(req.LLM,
+	raw, err := cs.completeText(r.Context(), req.LLM,
 		"你是一个影视信息提取助手。请从用户文本中提取 name、type(movie/tv)、year、is_remaster、season。只返回 JSON。",
 		req.Text,
 	)
@@ -328,7 +333,7 @@ func (cs *CognitionServer) handleTextTransform(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	text, err := cs.completeText(req.LLM, req.SystemHint, req.UserText)
+	text, err := cs.completeText(r.Context(), req.LLM, req.SystemHint, req.UserText)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -379,7 +384,9 @@ func (cs *CognitionServer) handleActionResult(w http.ResponseWriter, r *http.Req
 	cs.writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (cs *CognitionServer) handleRespond(req *RespondRequest) (*RespondResponse, error) {
+// Respond 实现 CognitionEngine 接口。
+// 处理完整对话请求：压力计算 → 声部选择 → 工具循环 → 回复生成。
+func (cs *CognitionServer) Respond(ctx context.Context, req *RespondRequest) (*RespondResponse, error) {
 	pressures, err := cs.computePressures(req)
 	if err != nil {
 		return nil, err
@@ -405,7 +412,7 @@ func (cs *CognitionServer) handleRespond(req *RespondRequest) (*RespondResponse,
 		return nil, err
 	}
 
-	replyText, transcript, err := cs.runToolLoop(req, systemPrompt, userPrompt)
+	replyText, transcript, err := cs.runToolLoop(ctx, req, systemPrompt, userPrompt)
 	if err != nil {
 		_, _ = cs.db.Exec(`UPDATE episodes SET status = ?, updated_at_ms = ? WHERE id = ?`, "failed", nowMS(), episodeID)
 		return nil, err
@@ -437,7 +444,7 @@ func (cs *CognitionServer) handleRespond(req *RespondRequest) (*RespondResponse,
 	}, nil
 }
 
-func (cs *CognitionServer) runToolLoop(req *RespondRequest, systemPrompt, userPrompt string) (string, []ToolTrace, error) {
+func (cs *CognitionServer) runToolLoop(ctx context.Context, req *RespondRequest, systemPrompt, userPrompt string) (string, []ToolTrace, error) {
 	aiClient := newAIClientFromLLM(req.LLM)
 	messages := []ChatMessage{
 		{Role: "system", Content: MessageContent{Text: systemPrompt}},
@@ -465,7 +472,18 @@ func (cs *CognitionServer) runToolLoop(req *RespondRequest, systemPrompt, userPr
 	}
 
 	for i := 0; i < 8; i++ {
-		resp, err := aiClient.ChatCompletion(messages, []Tool{runTool})
+		// 每轮开始前检查 context 是否已到期（优雅降级）
+		if err := ctx.Err(); err != nil {
+			log.Printf("[Cognition] runToolLoop 总预算耗尽 (轮次 %d/%d)，用已有结果返回", i+1, 8)
+			for j := len(messages) - 1; j >= 0; j-- {
+				if messages[j].Role == "assistant" && strings.TrimSpace(messages[j].Content.Text) != "" {
+					return messages[j].Content.Text, transcript, nil
+				}
+			}
+			return "", transcript, fmt.Errorf("cognition 处理超时")
+		}
+
+		resp, err := aiClient.ChatCompletionWithContext(ctx, messages, []Tool{runTool})
 		if err != nil {
 			return "", transcript, err
 		}
@@ -500,7 +518,7 @@ func (cs *CognitionServer) runToolLoop(req *RespondRequest, systemPrompt, userPr
 				})
 				continue
 			}
-			output, err := cs.executeRunCommand(command, req)
+			output, err := cs.executeRunCommand(ctx, command, req)
 			if err != nil {
 				output = fmt.Sprintf("tool error: %v", err)
 			}
@@ -523,7 +541,7 @@ func (cs *CognitionServer) runToolLoop(req *RespondRequest, systemPrompt, userPr
 	return "（达到工具预算上限，先收一下）", transcript, nil
 }
 
-func (cs *CognitionServer) executeRunCommand(command string, req *RespondRequest) (string, error) {
+func (cs *CognitionServer) executeRunCommand(ctx context.Context, command string, req *RespondRequest) (string, error) {
 	name, args := splitCommand(command)
 	if name == "diary.write" {
 		text := cs.normalizeText(args)
@@ -559,7 +577,7 @@ func (cs *CognitionServer) executeRunCommand(command string, req *RespondRequest
 		return "", err
 	}
 	engineURL := strings.TrimRight(req.EngineBaseURL, "/") + "/engine/run"
-	httpReq, err := http.NewRequest(http.MethodPost, engineURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, engineURL, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -585,9 +603,9 @@ func (cs *CognitionServer) executeRunCommand(command string, req *RespondRequest
 	return parsed.Output, nil
 }
 
-func (cs *CognitionServer) completeText(llm LLMConfig, systemPrompt, userText string) (string, error) {
+func (cs *CognitionServer) completeText(ctx context.Context, llm LLMConfig, systemPrompt, userText string) (string, error) {
 	aiClient := newAIClientFromLLM(llm)
-	msg, err := aiClient.ChatCompletion([]ChatMessage{
+	msg, err := aiClient.ChatCompletionWithContext(ctx, []ChatMessage{
 		{Role: "system", Content: MessageContent{Text: systemPrompt}},
 		{Role: "user", Content: MessageContent{Text: userText}},
 	}, nil)
@@ -595,6 +613,42 @@ func (cs *CognitionServer) completeText(llm LLMConfig, systemPrompt, userText st
 		return "", err
 	}
 	return strings.TrimSpace(cs.extractAssistantText(msg)), nil
+}
+
+// SendEvent 实现 CognitionEngine 接口。记录认知事件到事件日志。
+func (cs *CognitionServer) SendEvent(ctx context.Context, event *CognitionEvent) error {
+	return cs.persistEvent(event)
+}
+
+// TransformText 实现 CognitionEngine 接口。通用文本转换（知识格式化、摘要等）。
+func (cs *CognitionServer) TransformText(ctx context.Context, path string, req *TextTransformRequest) (string, error) {
+	text, err := cs.completeText(ctx, req.LLM, req.SystemHint, req.UserText)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(text), nil
+}
+
+// ParseRequestIntent 实现 CognitionEngine 接口。从用户文本中提取影视求片意图。
+func (cs *CognitionServer) ParseRequestIntent(ctx context.Context, llm LLMConfig, text string) (*RequestIntentResponse, error) {
+	raw, err := cs.completeText(ctx, llm,
+		"你是一个影视信息提取助手。请从用户文本中提取 name、type(movie/tv)、year、is_remaster、season。只返回 JSON。",
+		text,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return cs.coerceIntent(raw), nil
+}
+
+// ClaimAction 实现 CognitionEngine 接口。领取一个待执行的计划任务。
+func (cs *CognitionServer) ClaimAction(ctx context.Context) (*PlannedAction, error) {
+	return cs.claimAction()
+}
+
+// SubmitActionResult 实现 CognitionEngine 接口。提交任务执行结果。
+func (cs *CognitionServer) SubmitActionResult(ctx context.Context, actionID string, result *ActionResultRequest) error {
+	return cs.completeAction(actionID, result)
 }
 
 func (cs *CognitionServer) persistEvent(event *CognitionEvent) error {
@@ -1279,7 +1333,7 @@ func newAIClientFromLLM(llm LLMConfig) *AIClient {
 		Model:       llm.Model,
 		MaxTokens:   llm.MaxTokens,
 		Temperature: llm.Temperature,
-		HTTPClient:  &http.Client{Timeout: 60 * time.Second},
+		HTTPClient:  &http.Client{}, // 超时由 context 控制，不再硬编码
 	}
 }
 

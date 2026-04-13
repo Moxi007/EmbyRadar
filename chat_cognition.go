@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -21,7 +22,7 @@ func (ch *ChatHandler) emitCognitionEvent(eventType string, chatID, userID int64
 		Timestamp: time.Now().Format(time.RFC3339),
 		Metadata:  metadata,
 	}
-	if err := ch.cognition.SendEvent(event); err != nil {
+	if err := ch.cognition.SendEvent(context.Background(), event); err != nil {
 		log.Printf("[Cognition] 发送事件失败: %v", err)
 	}
 }

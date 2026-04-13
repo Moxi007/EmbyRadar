@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -24,7 +25,7 @@ type ChatHandler struct {
 	tmdbMap        map[int64]*TMDBClient     // chatID → 独立 TMDB 客户端
 	requestHandler *RequestHandler           // 全局求片处理器
 	memoryStore    *MemoryStore              // 向量记忆存储 (可为 nil)
-	cognition      *CognitionClient
+	cognition      CognitionEngine           // 认知引擎接口（本地直调，零 HTTP 开销）
 	transport      TransportExecutor
 
 	// 架构增强组件
@@ -110,8 +111,9 @@ func (ch *ChatHandler) SetMemoryStore(store *MemoryStore) {
 	ch.memoryStore = store
 }
 
-func (ch *ChatHandler) SetCognitionClient(client *CognitionClient) {
-	ch.cognition = client
+// SetCognitionEngine 注入认知引擎（CognitionServer 实现了 CognitionEngine 接口）
+func (ch *ChatHandler) SetCognitionEngine(engine CognitionEngine) {
+	ch.cognition = engine
 }
 
 // getCurrencyName 获取群组配置的货币名称
@@ -235,7 +237,7 @@ func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName 
 		log.Printf("[AI] cognition 未初始化，无法生成欢迎语")
 		return
 	}
-	resp, err := ch.cognition.Respond(&RespondRequest{
+	resp, err := ch.cognition.Respond(context.Background(), &RespondRequest{
 		LLM:                ch.llmConfig(),
 		EngineBaseURL:      defaultEngineBaseURL(),
 		StaticPrompt:       group.AISystemPrompt,
@@ -386,7 +388,7 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 
 			formattedContent := ""
 			if ch.cognition != nil {
-				transformed, err := ch.cognition.TransformText("/cognition/format-knowledge", &TextTransformRequest{
+				transformed, err := ch.cognition.TransformText(context.Background(), "/cognition/format-knowledge", &TextTransformRequest{
 					LLM:        ch.llmConfig(),
 					SystemHint: "你是一个专业的知识库摘要引擎。",
 					UserText:   formatPrompt,
@@ -954,7 +956,29 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		"display_role_raw": displayRole,
 	})
 
-	resp, err := ch.cognition.Respond(ch.buildRespondRequest(envelope, userText))
+	// 创建 150s 超时 context，确保不会无限等待
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer cancel()
+
+	// 启动 typing 心跳：每 4s 发送一次 "正在输入..."，向用户表明 bot 仍在思考
+	typingDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ch.bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
+			case <-typingDone:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	resp, err := ch.cognition.Respond(ctx, ch.buildRespondRequest(envelope, userText))
+	close(typingDone) // 停止 typing 心跳
 	if err != nil {
 		log.Printf("[AI] cognition/respond 失败: %v", err)
 		ch.sendReply(msg, "⚠️ AI 暂时无法回复，请稍后再试")

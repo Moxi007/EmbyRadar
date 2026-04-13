@@ -64,10 +64,8 @@ func main() {
 		if err := cognitionServer.Start(); err != nil {
 			log.Fatalf("启动 cognition 服务失败: %v", err)
 		}
-		cognitionClient := NewCognitionClient(appConfig.Global.CognitionBaseURL)
-		if err := cognitionClient.HealthCheck(); err != nil {
-			log.Fatalf("cognition 服务不可用，启动中止: %v", err)
-		}
+		// 直接使用 CognitionServer 作为 Engine（零 HTTP 开销，进程内直调）
+		var cognitionEngine CognitionEngine = cognitionServer
 
 		ctxManager := NewContextManager(appConfig.Global.AIMaxContext)
 
@@ -85,7 +83,7 @@ func main() {
 		requestHandler := NewRequestHandler(store)
 
 		chatHandler := NewChatHandler(bot, aiClient, ctxManager, appConfig, requestHandler)
-		chatHandler.SetCognitionClient(cognitionClient)
+		chatHandler.SetCognitionEngine(cognitionEngine)
 
 		hostEngine := NewHostEngine(chatHandler)
 		hostEngine.Start()
@@ -111,7 +109,7 @@ func main() {
 		var proactiveWorker *ProactiveActionWorker
 		if appConfig.Global.AutonomyEnabled {
 			proactiveWorker = NewProactiveActionWorker(
-				cognitionClient,
+				cognitionEngine,
 				hostEngine,
 				time.Duration(appConfig.Global.AutonomyTickSecs)*time.Second,
 			)
@@ -129,13 +127,13 @@ func main() {
 		// 启动每日摘要调度器（方案四长久记忆核心）
 		var digestScheduler *DigestScheduler
 		if appConfig.Global.DigestEnabled {
-			digestScheduler = NewDigestScheduler(cognitionClient, ctxManager, appConfig, memoryStore)
+			digestScheduler = NewDigestScheduler(cognitionEngine, ctxManager, appConfig, memoryStore)
 			if digestScheduler != nil {
 				digestScheduler.Start()
 			}
 		}
 
-		log.Printf("[AI] cognition 主链路已启动 (模型: %s, cognition: %s)", appConfig.Global.AIModel, appConfig.Global.CognitionBaseURL)
+		log.Printf("[AI] cognition 主链路已启动 (模型: %s, 引擎: 本地直调)", appConfig.Global.AIModel)
 
 		// 注册快捷命令菜单
 		setBotCommands(bot, appConfig)
