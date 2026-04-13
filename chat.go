@@ -1017,7 +1017,10 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}(chatID, userText, reply)
 	}
 
-	if reply != "" {
+	// 如果 AI 已通过工具（chat.say/chat.reply/chat.sticker）投递了消息，
+	// 则不再额外发送 replyText，避免重复说话。
+	// replyText 已保存到上下文和记忆中，保持对话连贯性。
+	if reply != "" && !toolDelivered {
 		ch.sendReply(msg, reply)
 		ch.emitCognitionEvent("message.sent", chatID, senderID, envelope.DisplayName, 0, reply, map[string]any{
 			"episode_id": resp.EpisodeID,
