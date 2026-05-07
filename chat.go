@@ -1,10 +1,11 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -25,14 +26,6 @@ type ChatHandler struct {
 	tmdbMap        map[int64]*TMDBClient     // chatID → 独立 TMDB 客户端
 	requestHandler *RequestHandler           // 全局求片处理器
 	memoryStore    *MemoryStore              // 向量记忆存储 (可为 nil)
-	cognition      CognitionEngine           // 认知引擎接口（本地直调，零 HTTP 开销）
-	transport      TransportExecutor
-
-	// 架构增强组件
-	sessionMgr   *SessionManager // 会话队列管理器（防并发）
-	toolRegistry *ToolRegistry   // 工具注册中心
-	skillsLoader *SkillsLoader   // 技能加载器 (可为 nil)
-	jobsLoader   *JobsLoader     // 任务加载器 (可为 nil)
 }
 
 // NewChatHandler 创建聊天处理器，遍历所有群组配置初始化各群组的独立客户端
@@ -48,7 +41,6 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 		ebMap:          make(map[int64]*EmbyBossClient),
 		tmdbMap:        make(map[int64]*TMDBClient),
 		requestHandler: requestHandler,
-		transport:      NewTelegramTransport(bot),
 	}
 
 	// 初始化通用知识库（所有群组共享，路径固定为 config/knowledge）
@@ -84,36 +76,12 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 		ch.kbMap[chatID] = kb
 	}
 
-	// 初始化工具注册中心
-	ch.toolRegistry = DefaultToolRegistry()
-
-	// 初始化技能加载器并注册 read_skill 和 write_skill 工具
-	ch.skillsLoader = NewSkillsLoader("config/skills")
-	ch.toolRegistry.Register(&ReadSkillHandler{loader: ch.skillsLoader})
-	ch.toolRegistry.Register(&WriteSkillHandler{loader: ch.skillsLoader})
-
-	// 初始化任务加载器并注册 read_job / write_job 工具
-	ch.jobsLoader = NewJobsLoader("config/jobs")
-	ch.toolRegistry.Register(&ReadJobHandler{loader: ch.jobsLoader})
-	ch.toolRegistry.Register(&WriteJobHandler{loader: ch.jobsLoader})
-
-	log.Printf("[工具注册] 已注册 %d 个工具 (含技能和任务工具)", len(ch.toolRegistry.order))
-
-	// 初始化会话队列管理器（用于防并发）
-	ch.sessionMgr = NewSessionManager(ch.handleAIResponse)
-	log.Printf("[会话队列] 会话管理器已初始化")
-
 	return ch
 }
 
 // SetMemoryStore 注入全局向量记忆存储
 func (ch *ChatHandler) SetMemoryStore(store *MemoryStore) {
 	ch.memoryStore = store
-}
-
-// SetCognitionEngine 注入认知引擎（CognitionServer 实现了 CognitionEngine 接口）
-func (ch *ChatHandler) SetCognitionEngine(engine CognitionEngine) {
-	ch.cognition = engine
 }
 
 // getCurrencyName 获取群组配置的货币名称
@@ -184,7 +152,7 @@ func (ch *ChatHandler) StartListening() {
 		}
 
 		if aiEnabled && ch.shouldRespond(update.Message) {
-			ch.sessionMgr.Enqueue(update.Message)
+			go ch.handleAIResponse(update.Message)
 		}
 	}
 }
@@ -211,6 +179,8 @@ func (ch *ChatHandler) handleMyChatMember(update *tgbotapi.ChatMemberUpdated) {
 	}
 }
 
+
+
 // NotifyNewEmbyUser 在发送贴纸并调用 AI 欢迎新主子/平民
 func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName string, embyName string) {
 	tgName = cleanMarkdownName(tgName)
@@ -233,33 +203,16 @@ func (ch *ChatHandler) NotifyNewEmbyUser(group *GroupConfig, tgID int64, tgName 
 		welcomePrompt = fmt.Sprintf(group.WelcomeCodePrompt, displayRole)
 	}
 
-	if ch.cognition == nil {
-		log.Printf("[AI] cognition 未初始化，无法生成欢迎语")
-		return
-	}
-	resp, err := ch.cognition.Respond(context.Background(), &RespondRequest{
-		LLM:                ch.llmConfig(),
-		EngineBaseURL:      defaultEngineBaseURL(),
-		StaticPrompt:       group.AISystemPrompt,
-		PersonaSeed:        ch.appConfig.Global.PersonaSeed,
-		QuietHours:         ch.appConfig.Global.QuietHours,
-		ProactiveCooldownM: ch.appConfig.Global.ProactiveCooldownMinutes,
-		RelationshipDecayD: ch.appConfig.Global.RelationshipDecayDays,
-		ChatID:             group.TelegramChatID,
-		UserID:             tgID,
-		UserName:           tgName,
-		IsPrivate:          false,
-		AllowSensitive:     true,
-		Text:               welcomePrompt,
-		KnowledgeSummary:   ch.summarizeKnowledge(group.TelegramChatID),
-		SkillSummaries:     ch.summarizeSkills(),
-		JobSummaries:       ch.summarizeJobs(),
-	})
+	// 构建一次性消息调用 AI，赋予"系统最高权限"以防被 AI 当作伪造消息拦截
+	// 欢迎消息不涉及媒体内容，media 传 nil
+	messages := ch.buildMessages(group.TelegramChatID, "系统通报", "系统最高权限", welcomePrompt, "", nil)
+
+	replyMsg, err := ch.aiClient.ChatCompletion(messages, nil)
 	if err != nil {
-		log.Printf("[AI] 欢迎新成员 cognition 调用失败: %v", err)
+		log.Printf("[AI] 欢迎新成员调用 AI 失败: %v", err)
 		return
 	}
-	reply := sanitizeChatText(resp.ReplyText)
+	reply := replyMsg.Content.Text
 
 	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
 	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
@@ -386,25 +339,23 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 			formatPrompt := "你现在是一个知识库整理助手。请将用户提供的以下内容进行提炼和格式化，使其最适合作为机器人的知识库（Wiki）供日后检索使用。" +
 				"要求：\n1. 剔除对话中的闲聊成分，只保留核心事实或步骤。\n2. 如果适合，请尽量使用结构化的 Q&A (问答)格式或条理清晰的列表格式。\n3. 直接输出整理后的内容，不要包含任何前言或解释词汇。\n\n需要整理的内容如下：\n" + content
 
+			formattedMsg, err := ch.aiClient.ChatCompletion([]ChatMessage{
+				{Role: "system", Content: MessageContent{Text: "你是一个专业的知识库摘要引擎。"}},
+				{Role: "user", Content: MessageContent{Text: formatPrompt}},
+			}, nil)
+
 			formattedContent := ""
-			if ch.cognition != nil {
-				transformed, err := ch.cognition.TransformText(context.Background(), "/cognition/format-knowledge", &TextTransformRequest{
-					LLM:        ch.llmConfig(),
-					SystemHint: "你是一个专业的知识库摘要引擎。",
-					UserText:   formatPrompt,
-				})
-				if err == nil {
-					formattedContent = transformed
-				} else {
-					log.Printf("[Cognition] 知识库格式化失败，将使用原始文本: %v", err)
-				}
+			if err == nil && formattedMsg != nil {
+				formattedContent = formattedMsg.Content.Text
 			}
 
-			if strings.TrimSpace(formattedContent) != "" {
+			if err == nil && strings.TrimSpace(formattedContent) != "" {
 				content = formattedContent
+			} else {
+				log.Printf("[AI] 格式化知识库失败，将使用原始文本: %v", err)
 			}
 
-			isNew, err := kb.MergeEntry(name, content, ch.cognition, ch.llmConfig())
+			isNew, err := kb.MergeEntry(name, content, ch.aiClient)
 			if err != nil {
 				if sentMsg.MessageID != 0 {
 					editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, fmt.Sprintf("❌ 添加知识库条目失败: %v", err))
@@ -482,7 +433,7 @@ func (ch *ChatHandler) handleCommand(msg *tgbotapi.Message) bool {
 			return true
 		}
 
-		ch.sessionMgr.Enqueue(msg)
+		go ch.handleAIResponse(msg)
 		return true
 
 	case "request":
@@ -916,97 +867,543 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 		}
 	}
 
-	isSensitiveAllowed := ch.canQuerySensitiveInfo(msg)
-	isGroupChat := msg.Chat != nil && (msg.Chat.Type == "group" || msg.Chat.Type == "supergroup")
-	if media != nil {
-		if media.IsVideo {
-			userText = "[用户发送了一个视频] " + userText
+	// 取消之前硬编码的关键字前置拦截逻辑，不再自动为每一句聊天请求用户资产。
+	// 改为提供专属的 AI 工具 (get_user_info) 让 AI 在需要时自行发问。
+	var embyBossData string
+
+	// 构建消息列表，传入媒体内容（无媒体时 media 为 nil）
+	messages := ch.buildMessages(chatID, displayRole, verifiedRole, userText, embyBossData, media)
+
+	// 准备工具配置
+	var tools []Tool
+	if group.AISearchEnabled {
+		modelName := strings.ToLower(ch.appConfig.Global.AIModel)
+		if strings.Contains(modelName, "gemini") {
+			// Gemini 系列模型注入原生 Google Search Grounding 参数
+			tools = append(tools, Tool{
+				Type:         "google_search",
+				GoogleSearch: map[string]any{},
+			})
+			log.Printf("[AI] 检测到 Gemini 模型，注入原生 Google Search Grounding 参数...")
 		} else {
-			userText = "[用户发送了一张图片] " + userText
+			// 普通模型使用自定义的 DuckDuckGo 爬虫 Function Calling
+			currentDateStr := time.Now().Format("2006年01月")
+			tools = append(tools, Tool{
+				Type: "function",
+				Function: &ToolFunction{
+					Name:        "search_web",
+					Description: fmt.Sprintf("必须使用此工具来获取最新的资讯和新闻。当前时间是 %s，你的搜索关键词中必须主动携带 '%s' 或者具体日期作为检索词，否则你会搜到过时的旧新闻！", currentDateStr, currentDateStr),
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"query": map[string]any{
+								"type":        "string",
+								"description": fmt.Sprintf("进行搜索引擎查询的关键词。务必包含时间如 '%s' 以保证时效性。", currentDateStr),
+							},
+						},
+						"required": []string{"query"},
+					},
+				},
+			})
+			log.Printf("[AI] 启用本地 DuckDuckGo search_web 工具...")
 		}
 	}
 
-	if ch.cognition == nil {
-		ch.sendReply(msg, "⚠️ cognition 未初始化，无法处理 AI 请求")
-		return
+	// 当群组配置了 TMDB API Key 时，注入 search_tmdb 工具定义
+	if ch.tmdbMap[chatID] != nil {
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "search_tmdb",
+				Description: "搜索 TMDB（The Movie Database）获取电影或电视剧的详细信息，包括简介、上映日期等。当用户询问影视相关问题时使用此工具。" +
+					"⚠️在回复中引用影视信息时，你必须原样使用搜索结果中提供的完整 TMDB 链接（格式为 https://www.themoviedb.org/...），绝对不能自行拼凑或修改链接中的任何部分。" +
+					"⚠️关于评分和评价：给用户展示评分时，必须【只提供豆瓣评分】（通过 search_web 工具搜索获取），只有在确实找不到豆瓣评分的情况下，才允许给出 TMDB 或 IMDb 等其他评分。评价一部影片时，绝对不能仅仅根据 TMDB 简介进行评价，你必须通过 search_web 工具搜索网上的真实影评和口碑，综合真实观众的评价来给出结论。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{
+							"type":        "string",
+							"description": "搜索关键词（电影或电视剧名称）",
+						},
+						"media_type": map[string]any{
+							"type":        "string",
+							"enum":        []string{"movie", "tv", ""},
+							"description": "媒体类型：movie（电影）、tv（电视剧），留空则搜索全部",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		})
+		log.Printf("[AI] 启用 TMDB search_tmdb 工具...")
 	}
 
-	envelope := &MessageEnvelope{
-		ChatID:           chatID,
-		SenderID:         senderID,
-		MessageID:        msg.MessageID,
-		ReplyToMessageID: 0,
-		DisplayName:      userName,
-		VerifiedRole:     verifiedRole,
-		IsPrivate:        !isGroupChat,
-		AllowSensitive:   isSensitiveAllowed,
-		UserName:         userName,
-	}
-	if msg.ReplyToMessage != nil {
-		envelope.ReplyToMessageID = msg.ReplyToMessage.MessageID
-	}
-	if verifiedRole != "" {
-		envelope.DisplayName = verifiedRole
+	// 当群组启用了图片生成功能且配置了模型时，注入 generate_image 工具定义
+	if group.AIImageEnabled && group.AIImageModel != "" {
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "generate_image",
+				Description: "根据用户的文字描述生成图片。当用户要求画图、生成图片、创作图像时使用此工具。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt": map[string]any{
+							"type":        "string",
+							"description": "图片描述文本，详细描述要生成的图片内容",
+						},
+					},
+					"required": []string{"prompt"},
+				},
+			},
+		})
+		log.Printf("[AI] 启用图片生成 generate_image 工具...")
 	}
 
-	ch.emitCognitionEvent("message.received", chatID, senderID, envelope.DisplayName, msg.MessageID, userText, map[string]any{
-		"is_private":       envelope.IsPrivate,
-		"allow_sensitive":  envelope.AllowSensitive,
-		"verified_role":    verifiedRole,
-		"display_role_raw": displayRole,
-	})
+	// 注入 Emby & EmbyBoss 深度交互专用的管家 Tools (前提是配置了对应的 API 客户端)
+	if ch.embyMap[chatID] != nil {
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "search_emby_library",
+				Description: "在私有 Emby 影音库中搜索是否拥有某部完整的电影或电视剧源文件。当用户问库里有没有什么片子时使用。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{
+							"type":        "string",
+							"description": "搜索关键词，例如电影名或导演名",
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+		})
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "get_emby_latest_added",
+				Description: "查询私有 Emby 影音库最近上传入库的电影或电视剧列表。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"limit": map[string]any{
+							"type":        "integer",
+							"description": "需要查询的最近更新数量，建议 5 到 10",
+						},
+					},
+				},
+			},
+		})
+		isSensitiveAllowed := ch.canQuerySensitiveInfo(msg)
+		isGroupChat := msg.Chat != nil && (msg.Chat.Type == "group" || msg.Chat.Type == "supergroup")
+		allowSensitiveDetails := isSensitiveAllowed && !isGroupChat
+		playbackDesc := "全能管家探针：通过底层系统查询特定用户在指定天数内的所有综合观影记录（包含：观看了哪些剧集、耗时多久、使用了几个独立的公网 IP、用了几台设备等）。当提问涉及到查水表、防分享、借号抓内鬼、或者单纯询问“某某看了什么好东西”时必须调用。"
+		required := []string{"target_tg_id"}
+		if !isSensitiveAllowed {
+			playbackDesc += " 非管理员仅允许查询自己的观影记录，且不会返回任何 IP 或设备信息。"
+			required = []string{}
+		} else if !allowSensitiveDetails {
+			playbackDesc += " 群聊只返回汇总信息，不会输出具体 IP 或设备明细。"
+		}
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "get_user_playback_stats",
+				Description: playbackDesc,
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"target_tg_id": map[string]any{
+							"type":        "integer",
+							"description": "需要重点关照/查询的目标用户的 Telegram ID (如果没指定别人，默认就是当前跟你对话的这个人的 ID)",
+						},
+						"days": map[string]any{
+							"type":        "integer",
+							"description": "要查询的历史时间跨度（天），默认 1（代表今天/最近24小时），可以指定长达 7 或者 30。",
+						},
+					},
+					"required": required,
+				},
+			},
+		})
+		tools = append(tools, Tool{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "get_user_info",
+				Description: "查询特定用户的 Emby 账号基础信息、VIP 状态等级、积分余额和账号过期时间等。当问及“我的账号”、“我有多少钱”、“他过期了吗”等涉及系统系统数据时必须调用。",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"target_tg_id": map[string]any{
+							"type":        "integer",
+							"description": "需要查询的目标用户的 Telegram ID (如果没指定别人，默认查当前跟你对话的这个人的 ID)",
+						},
+					},
+					"required": []string{"target_tg_id"},
+				},
+			},
+		})
+		if ch.canQuerySensitiveInfo(msg) {
+			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats, user_info)...")
+		} else {
+			log.Printf("[AI] 启用 Emby 管家工具集 (search, latest, playback_stats[脱敏], user_info)")
+		}
+	}
 
-	// 创建 300s 超时 context（5分钟），确保不会无限等待
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
+	// 循环处理 AI 的响应（支持多次连续工具调用）
+	var reply string
+	for i := 0; i < 5; i++ { // 最多允许连续调用5次工具
+		aiMsg, err := ch.aiClient.ChatCompletion(messages, tools)
+		if err != nil {
+			log.Printf("[AI] 调用 AI 失败: %v", err)
+			ch.sendReply(msg, "⚠️ AI 暂时无法回复，请稍后再试")
+			return
+		}
 
-	// 启动 typing 心跳：每 4s 发送一次 "正在输入..."，向用户表明 bot 仍在思考
-	typingDone := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(4 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				ch.bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
-			case <-typingDone:
-				return
-			case <-ctx.Done():
-				return
+		// 将 AI 的响应加入消息列表
+		messages = append(messages, *aiMsg)
+
+		// 检查是否有工具调用
+		if len(aiMsg.ToolCalls) > 0 {
+			for _, tc := range aiMsg.ToolCalls {
+				if tc.Function.Name == "search_web" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析参数失败: %v", err)
+						continue
+					}
+
+					query, ok := args["query"].(string)
+					if !ok {
+						log.Printf("[AI] 参数类型错误，query 不是 string")
+						continue
+					}
+
+					log.Printf("[AI] 【触发网络搜索】关键词: %s", query)
+					searchResult := SearchWeb(query)
+
+					// 将工具执行的结果作为 role="tool" 加回 messages
+					messages = append(messages, ChatMessage{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Name:       tc.Function.Name,
+						Content:    MessageContent{Text: searchResult},
+					})
+				}
+
+				// 处理 TMDB 影视搜索工具调用
+				if tc.Function.Name == "search_tmdb" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 search_tmdb 参数失败: %v", err)
+						continue
+					}
+
+					query, _ := args["query"].(string)
+					mediaType, _ := args["media_type"].(string)
+
+					log.Printf("[AI] 【触发 TMDB 搜索】关键词: %s, 类型: %s", query, mediaType)
+
+					var tmdbResult string
+					if tmdbClient := ch.tmdbMap[chatID]; tmdbClient != nil {
+						results, err := tmdbClient.SearchMulti(query, mediaType)
+						if err != nil {
+							log.Printf("[AI] TMDB 搜索失败: %v", err)
+							tmdbResult = fmt.Sprintf("TMDB 搜索失败: %v", err)
+						} else {
+							tmdbResult = FormatTMDBResultsForAI(results)
+						}
+					} else {
+						tmdbResult = "TMDB 功能未配置，无法搜索影视信息。"
+					}
+
+					// 将工具执行的结果作为 role="tool" 加回 messages
+					messages = append(messages, ChatMessage{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Name:       tc.Function.Name,
+						Content:    MessageContent{Text: tmdbResult},
+					})
+				}
+
+				// 处理图片生成工具调用
+				if tc.Function.Name == "generate_image" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 generate_image 参数失败: %v", err)
+						messages = append(messages, ChatMessage{
+							Role:       "tool",
+							ToolCallID: tc.ID,
+							Name:       tc.Function.Name,
+							Content:    MessageContent{Text: fmt.Sprintf("参数解析失败: %v", err)},
+						})
+						continue
+					}
+
+					prompt, _ := args["prompt"].(string)
+					if prompt == "" {
+						messages = append(messages, ChatMessage{
+							Role:       "tool",
+							ToolCallID: tc.ID,
+							Name:       tc.Function.Name,
+							Content:    MessageContent{Text: "缺少 prompt 参数"},
+						})
+						continue
+					}
+
+					log.Printf("[AI] 【触发图片生成】描述: %s", prompt)
+
+					// 调用图片生成并发送到群聊
+					err := ch.handleImageGeneration(msg, prompt, group)
+					var toolResult string
+					if err != nil {
+						toolResult = fmt.Sprintf("图片生成失败: %v", err)
+					} else {
+						toolResult = "图片已成功生成并发送"
+					}
+
+					messages = append(messages, ChatMessage{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Name:       tc.Function.Name,
+						Content:    MessageContent{Text: toolResult},
+					})
+				}
+
+				// 处理 Emby 管家 - 库内搜索
+				if tc.Function.Name == "search_emby_library" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 search_emby_library 参数失败: %v", err)
+						continue
+					}
+					query, _ := args["query"].(string)
+					log.Printf("[AI] 【触发片库搜索】关键词: %s", query)
+					
+					var toolResult string
+					if embyClient := ch.embyMap[chatID]; embyClient != nil {
+						items, err := embyClient.SearchMedia(query)
+						if err != nil {
+							toolResult = fmt.Sprintf("搜索失败: %v", err)
+						} else if len(items) == 0 {
+							toolResult = "库中未找到相关资源。"
+						} else {
+							var sb strings.Builder
+							for i, item := range items {
+								if i >= 10 { break }
+								sb.WriteString(fmt.Sprintf("- %s\n", item.FormatMediaInfo()))
+							}
+							toolResult = sb.String()
+						}
+					} else {
+						toolResult = "未配置 EmbyClient，无法查询片库。"
+					}
+					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
+				}
+
+				// 处理 Emby 管家 - 查询最新入库
+				if tc.Function.Name == "get_emby_latest_added" {
+					var args map[string]any
+					json.Unmarshal([]byte(tc.Function.Arguments), &args)
+					limitF, ok := args["limit"].(float64)
+					limit := 10
+					if ok && limitF > 0 { limit = int(limitF) }
+					
+					log.Printf("[AI] 【触发最新入库】Limit: %d", limit)
+					var toolResult string
+					if embyClient := ch.embyMap[chatID]; embyClient != nil {
+						items, err := embyClient.GetLatestMedia(limit)
+						if err != nil {
+							toolResult = fmt.Sprintf("查询最新入库失败: %v", err)
+						} else if len(items) == 0 {
+							toolResult = "暂无最新入库记录。"
+						} else {
+							var sb strings.Builder
+							for _, item := range items {
+								sb.WriteString(fmt.Sprintf("- %s\n", item.FormatMediaInfo()))
+							}
+							toolResult = sb.String()
+						}
+					} else {
+						toolResult = "未配置 EmbyClient，无法查询。"
+					}
+					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
+				}
+
+				// 处理 Emby 管家 - 查询用户观影历史
+				// 处理 Emby 管家 - 全能查询用户观影历史与设备/IP水表
+				if tc.Function.Name == "get_user_playback_stats" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 get_user_playback_stats 参数失败: %v", err)
+						continue
+					}
+					
+					// 目标用户是谁？
+					isSensitiveAllowed := ch.canQuerySensitiveInfo(msg)
+					isGroupChat := msg.Chat != nil && (msg.Chat.Type == "group" || msg.Chat.Type == "supergroup")
+					allowSensitiveDetails := isSensitiveAllowed && !isGroupChat
+					requestedTgID := msg.From.ID
+					if val, ok := args["target_tg_id"].(float64); ok && val > 0 {
+						requestedTgID = int64(val)
+					}
+					requestedOther := requestedTgID != msg.From.ID
+					targetTgID := msg.From.ID
+					if isSensitiveAllowed {
+						targetTgID = requestedTgID
+					}
+					
+					// 查几天？默认 1 天
+					days := 1
+					if val, ok := args["days"].(float64); ok && val > 0 {
+						days = int(val)
+					}
+					
+					var toolResult string
+					if ebClient := ch.ebMap[chatID]; ebClient != nil && ch.embyMap[chatID] != nil {
+						userInfo, err := ebClient.GetUserInfo(targetTgID)
+						if err == nil && userInfo != nil && userInfo.Data.EmbyID != "" {
+							log.Printf("[AI] 【触发全能观影探针】TGID: %d, EmbyID: %s, 天数: %d", targetTgID, userInfo.Data.EmbyID, days)
+							stats, err := ch.embyMap[chatID].GetUserPlaybackReportingStats(userInfo.Data.EmbyID, days)
+							if err != nil {
+								toolResult = fmt.Sprintf("查询失败(可能尚未安装 Playback Reporting 插件或数据库异常): %v", err)
+							} else {
+								var sb strings.Builder
+								if !isSensitiveAllowed && requestedOther {
+									sb.WriteString("提示：仅允许查询自己的记录，已自动切换为你的账号。\n")
+								}
+								sb.WriteString(fmt.Sprintf("以下是该用户在最近 %d 天内的全景观影报告：\n", days))
+								sb.WriteString(fmt.Sprintf("- 累计观看时长：约 %d 分钟\n", stats.TotalDuration))
+								if isSensitiveAllowed {
+									sb.WriteString(fmt.Sprintf("- 使用独立外网IP数：%d 个\n", stats.UniqueIPs))
+									sb.WriteString(fmt.Sprintf("- 使用独立设备数：%d 台\n", stats.UniqueDevices))
+									if allowSensitiveDetails {
+										if stats.UniqueIPs > 0 {
+											sb.WriteString(fmt.Sprintf("- IP明细: %s\n", strings.Join(stats.IPList, ", ")))
+										}
+										if stats.UniqueDevices > 0 {
+											sb.WriteString(fmt.Sprintf("- 设备明细: %s\n", strings.Join(stats.DeviceList, ", ")))
+										}
+									} else {
+										sb.WriteString("提示：群聊不输出具体 IP/设备明细，如需查看请私聊机器人。\n")
+									}
+								}
+								
+								if len(stats.WatchedItems) > 0 {
+									sb.WriteString("- 观看过的内容清单（已去重）：\n")
+									for _, item := range stats.WatchedItems {
+										sb.WriteString(fmt.Sprintf("  * %s\n", item))
+									}
+								} else {
+									sb.WriteString("- 观看过的内容清单：无（该用户这几天彻底没看剧，可能确实在摸鱼）\n")
+								}
+								
+								toolResult = sb.String()
+							}
+						} else {
+							toolResult = fmt.Sprintf("无法获取目标TGID=%d 的 Emby 生效账号数据（未绑定或不存在），无法查阅他的播放记录。", targetTgID)
+						}
+					} else {
+						toolResult = "未配置相关服务接口，功能受限。"
+					}
+					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
+				}
+				
+				// 处理 Emby 管家 - 查询用户基础资产与状态 (VIP、余额、过期时间等)
+				if tc.Function.Name == "get_user_info" {
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						log.Printf("[AI] 解析 get_user_info 参数失败: %v", err)
+						continue
+					}
+					
+					// 目标用户是谁？
+					targetTgID := msg.From.ID
+					if val, ok := args["target_tg_id"].(float64); ok && val > 0 {
+						targetTgID = int64(val)
+					}
+					
+					var toolResult string
+					if ebClient := ch.ebMap[chatID]; ebClient != nil {
+						userInfoResp, err := ebClient.GetUserInfo(targetTgID)
+						if err == nil && userInfoResp != nil && userInfoResp.Data.Tg.String() != "" {
+							log.Printf("[AI] 【触发私人资产探针】TGID: %d", targetTgID)
+							currencyName := ch.getCurrencyName(chatID)
+							if targetTgID == msg.From.ID {
+								toolResult = userInfoResp.FormatForAI(currencyName)
+							} else {
+								toolResult = fmt.Sprintf("【内部数据查询结果 - 对象TG ID: %d】：账号名「%s」，余额 %d %s，状态「%s」，过期时间戳: %s。货币须称「%s」。",
+									targetTgID, userInfoResp.Data.Name, userInfoResp.Data.Iv, currencyName,
+									func() string {
+										if userInfoResp.Data.Lv == "c" {
+											return "封禁状态(被禁止登录)"
+										}
+										return "正常"
+									}(),
+									userInfoResp.Data.Ex,
+									currencyName)
+							}
+						} else {
+							toolResult = fmt.Sprintf("无法获取目标TGID=%d 的 Emby 生效账号数据（未绑定或不存在）。", targetTgID)
+						}
+					} else {
+						toolResult = "未开启或未配置相关 EmbyBoss 服务接口，功能受限。"
+					}
+					messages = append(messages, ChatMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Function.Name, Content: MessageContent{Text: toolResult}})
+				}
 			}
+			// 继续进行下一次请求，让 AI 总结搜索结果
+			continue
 		}
-	}()
 
-	resp, err := ch.cognition.Respond(ctx, ch.buildRespondRequest(envelope, userText))
-	close(typingDone) // 停止 typing 心跳
-	if err != nil {
-		log.Printf("[AI] cognition/respond 失败: %v", err)
-		ch.sendReply(msg, "⚠️ AI 暂时无法回复，请稍后再试")
-		return
+		// 没有工具调用，正常返回文本
+		reply = aiMsg.Content.Text
+		break
 	}
 
-	reply := sanitizeChatText(resp.ReplyText)
-	toolDelivered := hasDeliveredConversation(resp.ToolTranscript)
-	if reply == "" && !toolDelivered {
+	if reply == "" {
 		reply = "（思考了很久，不知道该说什么）"
 	}
 
-	// 保存上下文（用户消息 + AI 回复）
-	ch.ctxManager.AddMessage(chatID, ChatMessage{
-		Role:    "user",
-		Content: MessageContent{Text: fmt.Sprintf("%s: %s", displayRole, userText)},
-	})
-	if reply != "" {
-		ch.ctxManager.AddMessage(chatID, ChatMessage{
-			Role:    "assistant",
-			Content: MessageContent{Text: reply},
-		})
+	// === 代码级脱敏：强制移除可能泄露的内部标签 ===
+	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ⚠️未知平民]", "")
+	reply = strings.ReplaceAll(reply, "[INTERNAL_AUTH_TAG: ✅已验证身份]", "")
+	reply = strings.ReplaceAll(reply, "⚠️未知平民", "")
+	reply = strings.ReplaceAll(reply, "✅已验证身份", "")
+	if idx := strings.Index(reply, "[INTERNAL_AUTH_TAG:"); idx != -1 {
+		if endIdx := strings.Index(reply[idx:], "]"); endIdx != -1 {
+			reply = reply[:idx] + reply[idx+endIdx+1:]
+		}
 	}
 
+	reply = strings.TrimSpace(reply)
+	// === 脱敏结束 ===
+
+	// 保存上下文（用户消息 + AI 回复）
+	// 多模态消息降级为纯文本描述，避免历史上下文中包含 Base64 编码数据
+	contextUserText := userText
+	if media != nil {
+		if media.IsVideo {
+			contextUserText = "[用户发送了一个视频] " + userText
+		} else {
+			contextUserText = "[用户发送了一张图片] " + userText
+		}
+	}
+	ch.ctxManager.AddMessage(chatID, ChatMessage{
+		Role:    "user",
+		Content: MessageContent{Text: fmt.Sprintf("%s: %s", displayRole, contextUserText)},
+	})
+	ch.ctxManager.AddMessage(chatID, ChatMessage{
+		Role:    "assistant",
+		Content: MessageContent{Text: reply},
+	})
+
 	// ====== [方案三：长期记忆异步归档] ======
-	if ch.memoryStore != nil && reply != "" {
-		go func(cid int64, userTextRaw, replyText string) {
-			memText := fmt.Sprintf("用户说: %s\nAI回答: %s", userTextRaw, replyText)
+	if ch.memoryStore != nil {
+		go func(cid int64, cUserText, cReply string) {
+			// 将这一轮完整的用户问题与 AI 回答应答拼合为一条完整的语义记忆
+			memText := fmt.Sprintf("用户说: %s\nAI回答: %s", cUserText, cReply)
 			metadata := map[string]any{
 				"timestamp": time.Now().Format(time.RFC3339),
 				"user_name": userName,
@@ -1014,49 +1411,168 @@ func (ch *ChatHandler) handleAIResponse(msg *tgbotapi.Message) {
 			if err := ch.memoryStore.Store(cid, memText, metadata); err != nil {
 				log.Printf("[记忆] 长期记忆写入 Qdrant 失败: %v", err)
 			}
-		}(chatID, userText, reply)
+		}(chatID, contextUserText, reply)
 	}
 
-	// 如果 AI 已通过工具（chat.say/chat.reply/chat.sticker）投递了消息，
-	// 则不再额外发送 replyText，避免重复说话。
-	// replyText 已保存到上下文和记忆中，保持对话连贯性。
-	if reply != "" && !toolDelivered {
-		ch.sendReply(msg, reply)
-		ch.emitCognitionEvent("message.sent", chatID, senderID, envelope.DisplayName, 0, reply, map[string]any{
-			"episode_id": resp.EpisodeID,
-			"tool_calls": len(resp.ToolTranscript),
-		})
-	}
-}
+	// 发送回复：检测 AI 回复中是否包含求片确认标记
+	requestConfirmRe := regexp.MustCompile(`\[REQUEST_CONFIRM:(.+?)\]`)
+	if matches := requestConfirmRe.FindStringSubmatch(reply); len(matches) == 2 {
+		movieName := strings.TrimSpace(matches[1])
+		// 从回复中移除标记
+		reply = strings.TrimSpace(requestConfirmRe.ReplaceAllString(reply, ""))
 
-func hasDeliveredConversation(transcript []ToolTrace) bool {
-	for _, item := range transcript {
-		command := strings.TrimSpace(item.Command)
-		if strings.HasPrefix(command, "chat.say") || strings.HasPrefix(command, "chat.reply") || strings.HasPrefix(command, "chat.sticker") {
-			return true
+		// 构建确认求片的 Inline Keyboard 按钮
+		// 回调数据格式：reqai:{chatID}:{userID}:{movieName}
+		// movieName 可能较长，Telegram 回调数据限制 64 字节，需要截断
+		callbackMovieName := movieName
+		if len(callbackMovieName) > 30 {
+			callbackMovieName = string([]rune(callbackMovieName)[:30])
 		}
+		cbData := fmt.Sprintf("%s:%d:%d:%s", aiConfirmCallbackPrefix, chatID, senderID, callbackMovieName)
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🎬 确认求片", cbData),
+			),
+		)
+
+		replyMsg := tgbotapi.NewMessage(chatID, reply)
+		replyMsg.ReplyToMessageID = msg.MessageID
+		replyMsg.ParseMode = "Markdown"
+		replyMsg.ReplyMarkup = keyboard
+		if _, err := ch.bot.Send(replyMsg); err != nil {
+			log.Printf("[AI] 发送求片确认消息失败: %v，降级为纯文本", err)
+			// Markdown 解析失败时降级为纯文本
+			replyMsg.ParseMode = ""
+			ch.bot.Send(replyMsg)
+		}
+	} else {
+		ch.sendReply(msg, reply)
 	}
-	return false
 }
 
-func (ch *ChatHandler) resolveSticker(chatID int64, name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return ""
-	}
+// buildMessages 构建发送给 AI 的完整消息列表。
+// media 参数用于传递多模态内容（图片/视频），为 nil 时保持纯文本模式。
+func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userText string, embyBossData string, media *MediaContent) []ChatMessage {
+	// 根据 chatID 获取群组配置，未匹配时回退到第一个群组
 	group := ch.appConfig.GetGroupConfig(chatID)
 	if group == nil {
-		return name
+		group = ch.appConfig.Groups[0]
 	}
-	if name == "welcome" && strings.TrimSpace(group.WelcomeStickerID) != "" {
-		return strings.TrimSpace(group.WelcomeStickerID)
+
+	var messages []ChatMessage
+
+	// 1. 系统提示词（人设 + 知识库）
+	systemPrompt := group.AISystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = "你是一个群聊助手，请保持回复简洁友好。"
 	}
-	if group.AIStickers != nil {
-		if stickerID, ok := group.AIStickers[name]; ok && strings.TrimSpace(stickerID) != "" {
-			return strings.TrimSpace(stickerID)
+
+	// 注入当前准确时间服务器时间
+	currentTime := time.Now().Format("2006年01月02日 15:04:05")
+	systemPrompt += fmt.Sprintf("\n\n[系统硬参]：当前服务器精确时间为：%s。当用户询问时间、日期、星期几或者判断今天、明天、昨天时，请务必以此时间为基准进行回答。", currentTime)
+
+	// 动态注入最高级强制指令（针对具体的特权用户）
+	if verifiedRole != "" {
+		systemPrompt += fmt.Sprintf("\n\n[系统最高强制指令]：当前与你对话的是你的绝对主子【%s】，其身份已通过物理级硬编码验证。你必须极度谦卑、绝对服从，绝不可对其身份产生任何质疑或指责！", verifiedRole)
+	}
+
+	// 注入通用知识库内容（所有群组共享）
+	if ch.globalKB != nil {
+		globalKBContent := ch.globalKB.GetContent()
+		if globalKBContent != "" {
+			systemPrompt += "\n\n" + globalKBContent
 		}
 	}
-	return name
+
+	// 注入群组级知识库内容（仅当群组知识库路径与通用知识库不同时，避免重复注入）
+	if kb := ch.kbMap[chatID]; kb != nil && kb.dir != ch.globalKB.dir {
+		kbContent := kb.GetContent()
+		if kbContent != "" {
+			systemPrompt += "\n\n" + kbContent
+		}
+	}
+
+	// 注入长期记忆 (方案三：语义搜索)
+	if ch.memoryStore != nil && userText != "" {
+		memories, err := ch.memoryStore.Search(chatID, userText, ch.appConfig.Global.MemoryTopK)
+		if err == nil && len(memories) > 0 {
+			systemPrompt += "\n\n[模糊记忆回忆]：以下是你从之前的过往交流中回想起来的相似片段（这可能会帮你想起相关语境）：\n"
+			for i, mem := range memories {
+				systemPrompt += fmt.Sprintf("%d. (来自 %s 于 %s 的记录): %s\n", i+1, mem.UserName, mem.Timestamp, mem.Text)
+			}
+		}
+	}
+
+	// 注入实时的 Emby 服务器客观数据（从群组级 Emby 客户端获取）
+	if embyClient := ch.embyMap[chatID]; embyClient != nil {
+		users, errU := embyClient.GetTotalUsers()
+		sessions, errS := embyClient.GetActiveSessions()
+		if errU == nil && errS == nil {
+			if group.AIEmbyStatsFormat != "" {
+				systemPrompt += fmt.Sprintf(group.AIEmbyStatsFormat, users, sessions)
+			}
+		}
+	}
+
+	// 当群组启用了求片功能时，在 system prompt 中注入求片引导指令，
+	// AI 识别到求片意图后返回特殊标记，由系统生成确认按钮
+	if group.RequestEnabled && ch.appConfig.Global.TMDBAPIKey != "" {
+		systemPrompt += "\n\n[系统硬约束 - 求片功能]：当用户表达想看某部影视、求片、找片、想要某个资源等意图时，" +
+			"你必须在回复末尾附加一个特殊标记：[REQUEST_CONFIRM:影视名称]。" +
+			"例如用户说「帮我找一下流浪地球」，你可以回复「好的，我来帮你搜索《流浪地球》[REQUEST_CONFIRM:流浪地球]」。" +
+			"标记中的影视名称应该是你理解的最准确的片名。" +
+			"注意：你不能声称已经帮用户提交了求片请求，你只是在帮用户发起搜索确认流程。" +
+			"如果用户只是在讨论或询问某部影视的信息（评分、剧情等），不要附加此标记。" +
+			"只有当用户明确表达了想要求片、想看、能不能加等获取资源的意图时才附加。"
+	}
+
+	messages = append(messages, ChatMessage{
+		Role:    "system",
+		Content: MessageContent{Text: systemPrompt},
+	})
+
+	// 2. 历史上下文
+	history := ch.ctxManager.GetMessages(chatID)
+	if history != nil {
+		messages = append(messages, history...)
+	}
+
+	// 3. 当前用户消息，并在末尾追加最终的防伪标签
+	var finalUserText string
+
+	// 按需组装个人资产状态
+	extraPrivateData := ""
+	if embyBossData != "" {
+		extraPrivateData = "\n\n" + embyBossData
+	}
+
+	if verifiedRole != "" {
+		finalUserText = fmt.Sprintf("%s: %s%s\n\n[INTERNAL_AUTH_TAG: ✅已验证身份]", userName, userText, extraPrivateData)
+	} else {
+		finalUserText = fmt.Sprintf("%s: %s%s\n\n[INTERNAL_AUTH_TAG: ⚠️未知平民]", userName, userText, extraPrivateData)
+	}
+
+	// 根据是否有媒体内容决定消息格式：
+	// 有媒体时使用 OpenAI Vision 格式的 content 数组，否则保持纯文本
+	if media != nil {
+		dataURL := fmt.Sprintf("data:%s;base64,%s", media.MIMEType, media.Base64Data)
+		messages = append(messages, ChatMessage{
+			Role: "user",
+			Content: MessageContent{
+				Parts: []ContentPart{
+					{Type: "text", Text: finalUserText},
+					{Type: "image_url", ImageURL: &ImageURL{URL: dataURL}},
+				},
+			},
+		})
+	} else {
+		messages = append(messages, ChatMessage{
+			Role:    "user",
+			Content: MessageContent{Text: finalUserText},
+		})
+	}
+
+	return messages
 }
 
 // cleanMention 从消息文本中移除 @botname

@@ -57,16 +57,6 @@ func main() {
 	}
 	if hasAIEnabled {
 		aiClient := NewAIClient(&appConfig.Global)
-		cognitionServer, err := NewCognitionServer(&appConfig.Global)
-		if err != nil {
-			log.Fatalf("初始化 cognition 服务失败: %v", err)
-		}
-		if err := cognitionServer.Start(); err != nil {
-			log.Fatalf("启动 cognition 服务失败: %v", err)
-		}
-		// 直接使用 CognitionServer 作为 Engine（零 HTTP 开销，进程内直调）
-		var cognitionEngine CognitionEngine = cognitionServer
-
 		ctxManager := NewContextManager(appConfig.Global.AIMaxContext)
 
 		// 初始化 SQLite 数据库
@@ -83,18 +73,12 @@ func main() {
 		requestHandler := NewRequestHandler(store)
 
 		chatHandler := NewChatHandler(bot, aiClient, ctxManager, appConfig, requestHandler)
-		chatHandler.SetCognitionEngine(cognitionEngine)
-
-		hostEngine := NewHostEngine(chatHandler)
-		hostEngine.Start()
 
 		// --------- [方案三] 向量记忆引擎 ---------
-		var memoryStore *MemoryStore
 		if appConfig.Global.QdrantURL != "" {
-			memoryStore = NewMemoryStore(&appConfig.Global)
+			memoryStore := NewMemoryStore(&appConfig.Global)
 			if err := memoryStore.EnsureCollection(); err != nil {
 				log.Printf("[记忆] Qdrant 向量数据库连接或初始化失败: %v (向量记忆功能已降级关闭)", err)
-				memoryStore = nil // Reset to nil if connection failed
 			} else {
 				log.Printf("[记忆] 向量库已连接 (Qdrant: %s, TopK: %d)", appConfig.Global.QdrantURL, appConfig.Global.MemoryTopK)
 				chatHandler.SetMemoryStore(memoryStore)
@@ -105,16 +89,6 @@ func main() {
 		// 创建 Poller 轮询器并启动（复用 chatHandler 的 embyMap）
 		poller := NewPoller(store, chatHandler.embyMap, bot, 30*time.Minute)
 		poller.Start()
-
-		var proactiveWorker *ProactiveActionWorker
-		if appConfig.Global.AutonomyEnabled {
-			proactiveWorker = NewProactiveActionWorker(
-				cognitionEngine,
-				hostEngine,
-				time.Duration(appConfig.Global.AutonomyTickSecs)*time.Second,
-			)
-			proactiveWorker.Start()
-		}
 
 		// 在独立 goroutine 中启动消息监听
 		go chatHandler.StartListening()
@@ -127,13 +101,13 @@ func main() {
 		// 启动每日摘要调度器（方案四长久记忆核心）
 		var digestScheduler *DigestScheduler
 		if appConfig.Global.DigestEnabled {
-			digestScheduler = NewDigestScheduler(cognitionEngine, ctxManager, appConfig, memoryStore)
+			digestScheduler = NewDigestScheduler(aiClient, ctxManager, appConfig)
 			if digestScheduler != nil {
 				digestScheduler.Start()
 			}
 		}
 
-		log.Printf("[AI] cognition 主链路已启动 (模型: %s, 引擎: 本地直调)", appConfig.Global.AIModel)
+		log.Printf("[AI] AI 聊天模块已启动 (模型: %s)", appConfig.Global.AIModel)
 
 		// 注册快捷命令菜单
 		setBotCommands(bot, appConfig)
@@ -150,12 +124,8 @@ func main() {
 		if digestScheduler != nil {
 			digestScheduler.Stop()
 		}
-		if proactiveWorker != nil {
-			proactiveWorker.Stop()
-		}
 		poller.Stop()
 		store.Close()
-		_ = cognitionServer.Close()
 		log.Printf("数据库和轮询器已关闭，程序退出")
 	} else {
 		log.Printf("[AI] AI 聊天模块未启用")
