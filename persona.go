@@ -28,6 +28,8 @@ type PersonaStore struct {
 	mu       sync.RWMutex
 }
 
+var personaDirectoryFileOrder = []string{"IDENTITY.md", "USER.md", "SOUL.md"}
+
 // NewPersonaStore 创建人格仓库实例。
 func NewPersonaStore(dir string) *PersonaStore {
 	if strings.TrimSpace(dir) == "" {
@@ -56,6 +58,11 @@ func (ps *PersonaStore) Load() error {
 	nextProfiles := make(map[string]PersonaProfile)
 	for _, entry := range entries {
 		if entry.IsDir() {
+			profile, ok := ps.loadDirectoryProfile(entry.Name())
+			if ok {
+				nextProfiles[profile.ID] = profile
+				log.Printf("[人格] 加载目录人格包: %s (%s)", profile.ID, profile.Name)
+			}
 			continue
 		}
 		if strings.EqualFold(entry.Name(), "README.md") || strings.EqualFold(entry.Name(), "README.txt") {
@@ -102,6 +109,52 @@ func (ps *PersonaStore) Load() error {
 		log.Printf("[人格] 共加载 %d 个人格包", len(ps.profiles))
 	}
 	return nil
+}
+
+func (ps *PersonaStore) loadDirectoryProfile(dirName string) (PersonaProfile, bool) {
+	if filepath.Base(dirName) != dirName {
+		return PersonaProfile{}, false
+	}
+
+	profileDir := filepath.Join(ps.dir, dirName)
+	profile := PersonaProfile{
+		ID:         dirName,
+		Name:       dirName,
+		SourcePath: profileDir,
+	}
+
+	var sections []string
+	for _, fileName := range personaDirectoryFileOrder {
+		path := filepath.Join(profileDir, fileName)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Printf("[人格] 读取目录人格文件失败: %s: %v", path, err)
+			}
+			continue
+		}
+
+		part := parsePersonaProfile(dirName, path, string(data))
+		if strings.TrimSpace(part.Name) != "" && part.Name != dirName {
+			profile.Name = part.Name
+		}
+		if strings.TrimSpace(part.Description) != "" {
+			profile.Description = part.Description
+		}
+		if strings.TrimSpace(part.Content) == "" {
+			continue
+		}
+
+		sectionName := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+		sections = append(sections, fmt.Sprintf("# %s\n\n%s", sectionName, strings.TrimSpace(part.Content)))
+	}
+
+	if len(sections) == 0 {
+		return PersonaProfile{}, false
+	}
+
+	profile.Content = strings.Join(sections, "\n\n")
+	return profile, true
 }
 
 // GetPrompt 获取指定人格的 system prompt 片段。
