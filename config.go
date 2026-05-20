@@ -28,15 +28,16 @@ type GlobalConfig struct {
 	DBPath           string  `json:"db_path"`      // SQLite 数据库路径，默认 config/embyradar.db
 	TMDBAPIKey       string  `json:"tmdb_api_key"` // TMDB API 密钥，为空时禁用 TMDB 相关功能
 	WebhookPort      int     `json:"webhook_port"` // 全局 Webhook 端口
-	
+
 	// AI 记忆系统配置
-	DigestEnabled    bool    `json:"digest_enabled"`    // 是否开启每日对话摘要（方案四）
-	DigestHour       int     `json:"digest_hour"`       // 每日执行摘要的小时（0-23），默认 3 (凌晨3点)
-	QdrantURL        string  `json:"qdrant_url"`        // Qdrant 数据库 HTTP 地址，为空则禁用向量记忆
-	EmbeddingAPIURL  string  `json:"embedding_api_url"` // 独立的 Embedding API 地址 (例如硅基流动)
-	EmbeddingAPIKey  string  `json:"embedding_api_key"` // Embedding API 密钥
-	EmbeddingModel   string  `json:"embedding_model"`   // Embedding 模型名称
-	MemoryTopK       int     `json:"memory_top_k"`      // 检索的记忆条数，默认 5
+	DigestEnabled   bool   `json:"digest_enabled"`    // 是否开启每日对话摘要（方案四）
+	DigestHour      int    `json:"digest_hour"`       // 每日执行摘要的小时（0-23），默认 3 (凌晨3点)
+	QdrantURL       string `json:"qdrant_url"`        // Qdrant 数据库 HTTP 地址，为空则禁用向量记忆
+	EmbeddingAPIURL string `json:"embedding_api_url"` // 独立的 Embedding API 地址 (例如硅基流动)
+	EmbeddingAPIKey string `json:"embedding_api_key"` // Embedding API 密钥
+	EmbeddingModel  string `json:"embedding_model"`   // Embedding 模型名称
+	MemoryTopK      int    `json:"memory_top_k"`      // 检索的记忆条数，默认 5
+	AIPersonaDir    string `json:"ai_persona_dir"`    // AI 人格包目录，默认 config/personas
 }
 
 // GroupConfig 群组级独立配置，每个 Telegram 群组一份
@@ -58,6 +59,7 @@ type GroupConfig struct {
 	AITriggerKeywords    []string         `json:"ai_trigger_keywords"`
 	AIRoles              map[int64]string `json:"ai_roles"`
 	AIKnowledgeDir       string           `json:"ai_knowledge_dir"`
+	AIPersonaID          string           `json:"ai_persona_id"` // 选择的人格包 ID，对应 ai_persona_dir 下的文件名
 	AIEmbyStatsFormat    string           `json:"ai_emby_stats_format"`
 	RequestEnabled       bool             `json:"request_enabled"`   // 求片功能开关，默认 false
 	RequestAdmins        []int64          `json:"request_admins"`    // 群组级求片管理员列表，为空时回退到全局 bot_admins
@@ -99,6 +101,7 @@ func (ac *AppConfig) SaveConfig(filename string) error {
 		"embedding_api_key":  ac.Global.EmbeddingAPIKey,
 		"embedding_model":    ac.Global.EmbeddingModel,
 		"memory_top_k":       ac.Global.MemoryTopK,
+		"ai_persona_dir":     ac.Global.AIPersonaDir,
 		"groups":             ac.Groups,
 	}
 	data, err := json.MarshalIndent(raw, "", "  ")
@@ -139,6 +142,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 		EmbeddingAPIKey  string          `json:"embedding_api_key"`
 		EmbeddingModel   string          `json:"embedding_model"`
 		MemoryTopK       int             `json:"memory_top_k"`
+		AIPersonaDir     string          `json:"ai_persona_dir"`
 		Groups           json.RawMessage `json:"groups"`
 	}
 
@@ -163,6 +167,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 				"embedding_api_key":  "",
 				"embedding_model":    "",
 				"memory_top_k":       5,
+				"ai_persona_dir":     defaultPersonaDir,
 				"groups": []map[string]interface{}{
 					{
 						"telegram_chat_id":    -1000000000000,
@@ -175,6 +180,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 						"ai_enabled":          false,
 						"ai_trigger_keywords": []string{},
 						"ai_roles":            map[string]string{},
+						"ai_persona_id":       "",
 						"request_coin_cost":   0,
 					},
 				},
@@ -262,6 +268,9 @@ func LoadConfig(filename string) (*AppConfig, error) {
 	if raw.MemoryTopK <= 0 {
 		raw.MemoryTopK = 5
 	}
+	if raw.AIPersonaDir == "" {
+		raw.AIPersonaDir = defaultPersonaDir
+	}
 	// 如果配置了 DigestHour 但超出了 0-23 的范围，则重置为凌晨 3 点
 	if raw.DigestHour < 0 || raw.DigestHour > 23 {
 		raw.DigestHour = 3
@@ -288,6 +297,7 @@ func LoadConfig(filename string) (*AppConfig, error) {
 			EmbeddingAPIKey:  raw.EmbeddingAPIKey,
 			EmbeddingModel:   raw.EmbeddingModel,
 			MemoryTopK:       raw.MemoryTopK,
+			AIPersonaDir:     raw.AIPersonaDir,
 		},
 		Groups: groups,
 	}

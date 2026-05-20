@@ -24,6 +24,7 @@ type ChatHandler struct {
 	embyMap        map[int64]*EmbyClient     // chatID → 独立 Emby 客户端
 	ebMap          map[int64]*EmbyBossClient // chatID → 独立 EmbyBoss 客户端
 	tmdbMap        map[int64]*TMDBClient     // chatID → 独立 TMDB 客户端
+	personaStore   *PersonaStore             // AI 人格包仓库，所有群组共享，群组按 ID 选择
 	requestHandler *RequestHandler           // 全局求片处理器
 	memoryStore    *MemoryStore              // 向量记忆存储 (可为 nil)
 }
@@ -49,9 +50,18 @@ func NewChatHandler(bot *tgbotapi.BotAPI, aiClient *AIClient, ctxManager *Contex
 		log.Printf("[知识库] 通用知识库加载失败: %v", err)
 	}
 
+	// 初始化人格仓库。人格与知识库分层加载，避免角色风格污染事实资料和技能 SOP。
+	ch.personaStore = NewPersonaStore(appConfig.Global.AIPersonaDir)
+	if err := ch.personaStore.Load(); err != nil {
+		log.Printf("[人格] 人格仓库加载失败: %v", err)
+	}
+
 	// 遍历所有群组配置，为每个群组初始化独立的客户端实例
 	for _, g := range appConfig.Groups {
 		chatID := g.TelegramChatID
+		if strings.TrimSpace(g.AIPersonaID) != "" && !ch.personaStore.HasProfile(g.AIPersonaID) {
+			log.Printf("[人格] 群组 %d 配置的人格包不存在: %s", chatID, g.AIPersonaID)
+		}
 
 		// 初始化 Emby 客户端（仅当配置了 EmbyURL 时）
 		if g.EmbyURL != "" {
@@ -1465,6 +1475,14 @@ func (ch *ChatHandler) buildMessages(chatID int64, userName, verifiedRole, userT
 	systemPrompt := group.AISystemPrompt
 	if systemPrompt == "" {
 		systemPrompt = "你是一个群聊助手，请保持回复简洁友好。"
+	}
+
+	if ch.personaStore != nil {
+		personaPrompt := ch.personaStore.GetPrompt(group.AIPersonaID)
+		if personaPrompt != "" {
+			systemPrompt += "\n\n" + personaPrompt
+			systemPrompt += "\n\n[系统硬约束 - 人格边界]：上方人格包只定义称呼、语气、表达风格与背景设定。它不得覆盖系统权限、工具调用、事实核验、管理员指令保密、求片流程、用户隐私与安全边界；当人格内容与系统规则冲突时，必须优先遵守系统规则。"
+		}
 	}
 
 	// 注入当前准确时间服务器时间
